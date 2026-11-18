@@ -37,6 +37,10 @@
     for (const node of profile.nodes || []) {
       if (renames.has(node['dialer-proxy'])) node['dialer-proxy'] = target(node['dialer-proxy']);
     }
+    if (profile.customNodeDialers) {
+      profile.customNodeDialers = Object.fromEntries(Object.entries(profile.customNodeDialers)
+        .map(([name, dialer]) => [name, target(dialer)]));
+    }
     function dnsTarget(value) {
       if (Array.isArray(value)) return value.map(dnsTarget);
       if (value && typeof value === 'object') {

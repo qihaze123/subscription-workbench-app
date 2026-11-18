@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from backend.compiler import compile_profile as compile_clash, parse_yaml
-from backend.custom_nodes import apply_node_change, public_node
+from backend.custom_nodes import change_catalog, migrate_profiles, public_node, select_nodes
 from backend.distribution import public_metadata
 from backend.local_data import hydrate
 from backend.rule_templates import catalog, load_template
@@ -44,8 +44,10 @@ def reconcile_group_names(profile, *baselines):
                 renames[old] = new
     if not renames:
         return profile
-    profile = copy.deepcopy(profile)
+    return retarget_references(copy.deepcopy(profile), renames)
 
+
+def retarget_references(profile, renames):
     def target(name):
         return renames.get(name, name) if isinstance(name, str) else name
 
@@ -90,6 +92,8 @@ def public_profile(profile):
     result = normalize_profile(profile)
     result.pop('extras', None)
     managed = set(result.pop('customNodeNames', []))
+    result['customNodeDialers'] = {node['name']: node['dialer-proxy'] for node in result.get('nodes', [])
+                                   if node['name'] in managed and node.get('dialer-proxy')}
     result['nodes'] = [public_node(node, managed) for node in result.get('nodes', [])]
     for group in result.get('groups', []):
         previous = (group.get('extra') or {}).get('tolerance')
@@ -142,6 +146,16 @@ class WorkbenchAPI:
     def __init__(self, store, distribution):
         self.store = store
         self.distribution = distribution
+        with store.lock, store.db:
+            if store.db.execute("SELECT 1 FROM meta WHERE key='customNodes'").fetchone() is None:
+                profiles = [json.loads(row['body']) for row in store.db.execute('SELECT body FROM profiles ORDER BY rowid')]
+                before = {profile['id']: js(profile) for profile in profiles}
+                store._set('customNodes', migrate_profiles(profiles, retarget_references))
+                store._set('customNodesRevision', 1)
+                for profile in profiles:
+                    if js(profile) != before[profile['id']]:
+                        store.db.execute('UPDATE profiles SET body=?,revision=revision+1 WHERE id=?',
+                                         (js(profile), profile['id']))
         if not hasattr(store, 'workbench_probe'):
             store.workbench_probe = WorkbenchProbe(store)
         self.probe = store.workbench_probe
@@ -213,7 +227,7 @@ class WorkbenchAPI:
             if not row['published'] or row['published'] != data.get('publishedVersion'):
                 raise Problem('当前发布版本已变化，请刷新后再查看变更。', 409)
             published = json.loads(store._version(row['id'], row['published'])['body'])
-            target = self.merge(json.loads(row['body']), data.get('currentProfile'), published)
+            target = self.merge_draft(json.loads(row['body']), data.get('currentProfile'), published)
             comparison, baseline, actions = self.review_difference(row, target)
             if not restore:
                 return comparison
@@ -250,6 +264,7 @@ class WorkbenchAPI:
             profiles = [self.profile_status(row) for row in rows]
             measurements = self.probe.measurements()
             data = {'liveData': True, 'profiles': profiles, 'company': self.store._get('company'),
+                    **self.custom_nodes_data(),
                     'sources': [public_source(source, measurements.get(source['id'])) for source in self.store._get('sources')],
                     'nodeProbeAvailable': self.probe.available, 'draftReviewAvailable': True,
                     'distribution': public_metadata(self.distribution, self.store, prefer_tailnet=bool(tailnet_admin))}
@@ -291,6 +306,8 @@ class WorkbenchAPI:
         pid = data.get('profileId')
         store = self.store
         with store.lock, store.db:
+            if 'nodeChange' in data:
+                raise Problem('请在「订阅源与节点」管理自定义节点', 422)
             if action == 'create':
                 name = str(data.get('name', '')).strip()
                 if not name:
@@ -325,10 +342,9 @@ class WorkbenchAPI:
                 return {'profile': self.profile_status(store._row(pid)),
                         'message': '已载入历史版本的草稿'}
             published = json.loads(store._version(pid, row['published'])['body']) if row['published'] else None
-            target = self.merge(current, data.get('updates') if action == 'save-draft' else data.get('currentProfile'), published)
+            updates = data.get('updates') if action == 'save-draft' else data.get('currentProfile')
+            target = self.merge_draft(current, updates, published)
             if action == 'save-draft':
-                if 'nodeChange' in data:
-                    apply_node_change(target, data['nodeChange'])
                 store.save(pid, target, row['revision'])
                 return {'profile': self.profile_status(store._row(pid))}
             sources, company = store._get('sources'), store._get('company')
@@ -344,6 +360,35 @@ class WorkbenchAPI:
                 (js(clean_profile(target)), version, stamp, pid))
             return {'profile': self.profile_status(store._row(pid)), 'version': version,
                     'publishedAt': stamp, 'effectiveRules': document['rules'], 'nodeCount': len(document['proxies'])}
+
+    def merge_draft(self, current, updates, published):
+        target = self.merge(current, updates, published)
+        return select_nodes(target, self.store._get('customNodes'), updates.get('customNodeDialers'))
+
+    def custom_nodes_data(self):
+        nodes = self.store._get('customNodes')
+        names = {node['name'] for node in nodes}
+        return {'customNodes': [public_node(node, names) for node in nodes],
+                'customNodesRevision': self.store._get('customNodesRevision')}
+
+    def mutate_custom_nodes(self, data):
+        store = self.store
+        with store.lock, store.db:
+            revision = store._get('customNodesRevision')
+            if data.get('revision') != revision:
+                raise Problem('自定义节点已在其他页面更新，请刷新再试。', 409)
+            rows = list(store.db.execute('SELECT * FROM profiles'))
+            profiles = [json.loads(row['body']) for row in rows]
+            store._set('customNodes', change_catalog(store._get('customNodes'), profiles, data))
+            store._set('customNodesRevision', revision + 1)
+            changed = []
+            for row, profile in zip(rows, profiles):
+                if profile != json.loads(row['body']):
+                    store.db.execute('UPDATE profiles SET body=?,updated=?,revision=revision+1 WHERE id=?',
+                                     (js(profile), now(), row['id']))
+                    changed.append({'previousRevision': row['revision'],
+                                    'profile': self.profile_status(store._row(row['id']))})
+            return {**self.custom_nodes_data(), 'changedProfiles': changed}
 
     def mutate_source(self, action, data):
         store = self.store
@@ -403,6 +448,8 @@ class WorkbenchAPI:
             return {'source': public_source(source), 'message': message}
 
     def handle(self, handler, method, path, query, data, tailnet_admin):
+        if method == 'POST' and path == '/api/custom-nodes':
+            return handler.json(self.mutate_custom_nodes(data)) or True
         if method == 'GET' and path == '/api/data':
             return handler.json(self.bootstrap(tailnet_admin, compact=query.get('view') == ['bootstrap'])) or True
         if method == 'GET' and path == '/api/history':

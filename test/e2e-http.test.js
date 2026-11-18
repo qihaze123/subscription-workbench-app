@@ -309,34 +309,109 @@ async function runE2ETests() {
     assert.strictEqual(pubRes.json.version, 3, '新发布版本号应为历史最大 2 + 1 = 3');
   });
 
-  await testCase('自定义节点可加入策略组，发布订阅时带上代理配置', async () => {
-    const profileId = blankProfile.id;
+  await testCase('共享自定义节点支持两端独立选用、发布与恢复', async () => {
     const name = '示例独立代理';
     const password = 'demo-test-only-password';
+    const addPath = { path: '/api/custom-nodes', method: 'POST' };
     const savePath = { path: '/api/profile/save-draft', method: 'POST' };
+    const publishPath = { path: '/api/profile/publish', method: 'POST' };
     const group = { id: 'custom-exit', name: '指定出口', type: 'select', members: [name], selectors: [], options: {} };
     const rules = [{ type: 'DOMAIN-SUFFIX', value: 'test.example', target: group.name, enabled: true },
       { type: 'MATCH', value: '', target: 'DIRECT', enabled: true }];
-    const added = await request(savePath, {
-      profileId,
-      updates: { groups: [group], rules },
-      nodeChange: { action: 'add', name, type: 'socks5', server: '192.0.2.20', port: 1080, username: 'example', password }
-    });
+    const metadata = await request({ path: '/api/data?view=bootstrap' });
+    const data = { name, type: 'socks5', server: '192.0.2.20', port: 1080, username: 'example', password };
+    const added = await request(addPath, { ...data, action: 'add', revision: metadata.json.customNodesRevision });
     assert.strictEqual(added.statusCode, 200);
-    assert.strictEqual(added.json.profile.nodes.find(node => node.name === name).hasPassword, true);
+    assert.equal(added.json.customNodes.length, 1);
+    assert.equal(added.json.customNodes[0].hasPassword, true);
     assert.ok(!added.body.includes(password));
-    assert.ok(!(await request({ path: '/api/data?view=bootstrap' })).body.includes(password));
-    assert.strictEqual((await request({ path: `/sub/${profileId}.yaml` })).statusCode, 404);
-    const published = await request({ path: '/api/profile/publish', method: 'POST' }, {
-      profileId, currentProfile: added.json.profile
-    });
-    assert.strictEqual(published.statusCode, 200);
-    const downloaded = await request({ path: `/sub/${profileId}.yaml` });
-    assert.ok(downloaded.body.includes(`password: "${password}"`));
-    assert.ok(downloaded.body.includes(`DOMAIN-SUFFIX,test.example,${group.name}`));
-    assert.ok(downloaded.body.includes(`- "${name}"`));
-    const removed = await request(savePath, { profileId, updates: {}, nodeChange: { action: 'remove', name } });
-    assert.strictEqual(removed.statusCode, 400);
+    assert.ok(!(await request({ path: '/api/data' })).body.includes(password));
+
+    for (const profileId of [blankProfile.id, 'phone']) {
+      const drafted = await request(savePath, { profileId, updates: { groups: [group], rules } });
+      assert.strictEqual(drafted.statusCode, 200);
+      const published = await request(publishPath, { profileId, currentProfile: drafted.json.profile });
+      assert.strictEqual(published.statusCode, 200);
+      const downloaded = await request({ path: `/sub/${profileId}.yaml` });
+      assert.ok(downloaded.body.includes(`password: "${password}"`));
+      assert.ok(downloaded.body.includes(`DOMAIN-SUFFIX,test.example,${group.name}`));
+      assert.ok(downloaded.body.includes(`- "${name}"`));
+    }
+    const phonePath = { path: '/sub/phone.yaml' };
+    const previous = (await request(phonePath)).body;
+    const updated = await request(addPath, { ...data, action: 'edit', revision: added.json.customNodesRevision, port: 1081 });
+    assert.equal(updated.statusCode, 200);
+    assert.equal(updated.json.changedProfiles.length, 2);
+    assert.equal((await request(phonePath)).body, previous);
+    const phone = updated.json.changedProfiles.find(item => item.profile.id === 'phone').profile;
+    assert.equal((await request(publishPath, { profileId: 'phone', currentProfile: phone })).statusCode, 200);
+    assert.match((await request(phonePath)).body, /port: 1081/);
+    const rollback = await request({ path: '/api/profile/rollback', method: 'POST' },
+      { profileId: 'phone', targetVersion: phone.publishedVersion });
+    assert.equal(rollback.statusCode, 200);
+    assert.equal((await request(publishPath, { profileId: 'phone', currentProfile: rollback.json.profile })).statusCode, 200);
+    const configBody = yaml => yaml.split('\n').filter(line => !line.startsWith('#')).join('\n');
+    assert.equal(configBody((await request(phonePath)).body), configBody(previous));
+    const removal = await request(addPath, { action: 'remove', name, revision: updated.json.customNodesRevision });
+    assert.equal(removal.statusCode, 400);
+  });
+
+  await testCase('空白设备配置可发布和回退各自的 Tailscale 前置节点', async () => {
+    const bootstrap = { path: '/api/data?view=bootstrap' };
+    const addPath = { path: '/api/custom-nodes', method: 'POST' };
+    const profiles = [];
+    let revision = (await request(bootstrap)).json.customNodesRevision;
+    for (const device of ['desktop', 'phone']) {
+      const created = await request({ path: '/api/profile/create', method: 'POST' }, { name: `空白 ${device}`, device });
+      assert.equal(created.statusCode, 200);
+      const profile = created.json.profile;
+      assert.deepEqual(profile.nodes, []);
+      const nodeName = `TS-${device}`;
+      const added = await request(addPath, {
+        action: 'add', revision, name: nodeName, type: 'tailscale', profileId: profile.id, hostname: `demo-${device}`
+      });
+      assert.equal(added.statusCode, 200);
+      assert.equal(added.json.customNodes.find(node => node.name === nodeName).profileId, profile.id);
+      revision = added.json.customNodesRevision;
+      profiles.push({ ...profile, nodeName, device });
+    }
+    const dirs = new Set();
+    for (const profile of profiles) {
+      const profileId = profile.id;
+      const groups = [
+        { id: 'mesh', name: 'Mesh', type: 'select', members: [profile.nodeName], selectors: [], options: {} },
+        { id: 'corp', name: 'Company', type: 'select', members: ['示例独立代理'], selectors: [], options: {} },
+      ];
+      const rules = [
+        { type: 'DOMAIN-SUFFIX', value: 'ts.net', target: 'Mesh', enabled: true },
+        { type: 'IP-CIDR', value: '192.0.2.0/24', target: 'Company', enabled: true },
+        { type: 'MATCH', value: '', target: 'DIRECT', enabled: true },
+      ];
+      const save = { path: '/api/profile/save-draft', method: 'POST' };
+      const publish = { path: '/api/profile/publish', method: 'POST' };
+      const download = { path: `/sub/${profileId}.yaml` };
+      const wrong = await request(save, { profileId, updates: { groups, rules,
+        customNodeDialers: { 示例独立代理: profiles.find(item => item.id !== profileId).nodeName } } });
+      assert.equal(wrong.statusCode, 400);
+      const saved = await request(save, { profileId, updates: { groups, rules,
+        customNodeDialers: { 示例独立代理: profile.nodeName } } });
+      assert.equal(saved.statusCode, 200);
+      const first = await request(publish, { profileId, currentProfile: saved.json.profile });
+      assert.equal(first.statusCode, 200);
+      const original = (await request(download)).body;
+      assert.ok(original.includes(`hostname: "demo-${profile.device}"`));
+      assert.ok(original.includes(`dialer-proxy: "${profile.nodeName}"`));
+      assert.doesNotMatch(original, /auth-key:|profileId:/);
+      dirs.add(original.match(/state-dir: "([^"]+)"/)[1]);
+      const second = await request(publish, { profileId, currentProfile: { ...first.json.profile, customNodeDialers: {} } });
+      assert.equal(second.statusCode, 200);
+      const rollback = await request({ path: '/api/profile/rollback', method: 'POST' }, { profileId, targetVersion: first.json.version });
+      assert.equal(rollback.statusCode, 200);
+      const restored = await request(publish, { profileId, currentProfile: rollback.json.profile });
+      assert.equal(restored.statusCode, 200);
+      assert.ok((await request(download)).body.includes(`dialer-proxy: "${profile.nodeName}"`));
+    }
+    assert.equal(dirs.size, 2);
   });
 
   // 7. 订阅刷新真实性测试 (重点验证第三项修复)

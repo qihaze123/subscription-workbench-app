@@ -280,13 +280,14 @@
   // ========================================================
 
   function draftUpdates(profile) {
-    const { groups, rules, network, hosts, sourceIds, name } = profile;
-    return { groups, rules, network, hosts, sourceIds, name };
+    const { groups, rules, network, hosts, sourceIds, name, customNodeDialers } = profile;
+    return { groups, rules, network, hosts, sourceIds, name, customNodeDialers };
   }
 
   async function saveDraft() {
     const prof = getCurrentProfile();
     if (!prof || !getEditState(prof).dirty || state.profileWrites.has(prof.id)) return;
+    const requestedKey = profileContentKey(prof);
     state.profileWrites.add(prof.id);
     updateTopbarBadges();
 
@@ -306,6 +307,8 @@
         throw new Error(json.error || `保存失败 (HTTP ${res.status})`);
       }
 
+      if (profileContentKey(prof) === requestedKey) prof.customNodeDialers = json.profile.customNodeDialers;
+      prof.nodes = json.profile.nodes;
       acceptSavedProfile(prof, json.profile);
       const { dirty, pending } = getEditState(prof);
       if (dirty) showToast('已保存，另有未保存的修改', 'info');
@@ -1051,7 +1054,7 @@
         }
         const reserved = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL'];
         const taken = groups.some(group => group !== currentGroup && group.name === nextName) ||
-          (prof.nodes || []).some(node => node.name === nextName) ||
+          [...(prof.nodes || []), ...(state.data.customNodes || [])].some(node => node.name === nextName) ||
           (state.data.sources || []).some(source => source.enabled !== false &&
             prof.sourceIds?.includes(source.id) && source.nodes?.some(node => node.name === nextName));
         const error = !nextName ? '请输入策略组名称。' : /[,#&\r\n]/.test(nextName)
@@ -1231,7 +1234,7 @@
         sourcesByNode.set(n.name, src);
       }
     }
-    for (const n of profile.nodes || []) {
+    for (const n of [...catalogNodesFor(profile), ...(profile.nodes || [])]) {
       rawNodesMap.set(n.name, n);
     }
     for (const other of profile.groups || []) {
@@ -1293,6 +1296,19 @@
     return `<span class="node-exit-ip tabular-nums">出口 IP <span>${escapeHtml(value)}</span></span>`;
   }
 
+  const moreIcon = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
+
+  function openNodePopover(popover, trigger) {
+    popover.showPopover({ source: trigger });
+    const anchor = trigger.getBoundingClientRect();
+    const { width, height } = popover.getBoundingClientRect();
+    const left = Math.max(8, Math.min(anchor.right - width, innerWidth - width - 8));
+    const top = anchor.bottom + height + 6 <= innerHeight - 8
+      ? anchor.bottom + 6 : Math.max(8, anchor.top - height - 6);
+    Object.assign(popover.style, { top: `${top}px`, left: `${left}px` });
+    popover.querySelector('button')?.focus({ preventScroll: true });
+  }
+
   function createNodeElement(node, group, index, count, excluded, source, move, profile) {
     const item = document.createElement('div');
     const preferred = index === 0 && group.type !== 'url-test';
@@ -1309,7 +1325,7 @@
         <span class="node-name" title="${fullName}">${name}</span>
         ${canMove ? `<button type="button" class="node-priority-select" aria-label="选择 ${fullName}" aria-pressed="false" title="${fullName}" hidden>${name}</button>` : ''}
         <button type="button" class="btn btn-subtle node-more" title="节点详情与操作" aria-label="${fullName}的详情与操作" aria-expanded="false">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+          ${moreIcon}
         </button>
       </div>
       <label class="node-bulk-pick" hidden><input type="checkbox" value="${fullName}" data-bulk-node aria-label="选择 ${fullName}"><span>选择</span></label>
@@ -1376,14 +1392,7 @@
           setBackup.add(option);
         }
       }
-      popover.showPopover({ source: more });
-      const anchor = more.getBoundingClientRect();
-      const { width, height } = popover.getBoundingClientRect();
-      const left = Math.max(8, Math.min(anchor.right - width, innerWidth - width - 8));
-      const top = anchor.bottom + height + 6 <= innerHeight - 8
-        ? anchor.bottom + 6 : Math.max(8, anchor.top - height - 6);
-      Object.assign(popover.style, { top: `${top}px`, left: `${left}px` });
-      popover.querySelector('button')?.focus({ preventScroll: true });
+      openNodePopover(popover, more);
     };
     popover.addEventListener('toggle', event => more.setAttribute('aria-expanded', String(event.newState === 'open')));
     const openGroup = popover.querySelector('.group-node-open');
@@ -1572,7 +1581,13 @@
     const reserved = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL'];
     const attached = new Set(fixed);
     const linked = profile.groups.filter(group => !groupLeadsTo(group.name, original.name, groups));
-    const builtins = [...new Set([...(profile.nodes || []).map(node => node.name), 'DIRECT', 'REJECT', 'PASS'])];
+    const localNodes = (profile.nodes || []).filter(node => !node.custom).map(node => node.name);
+    const customNodes = new Map([...catalogNodesFor(profile), ...(profile.nodes || []).filter(node => node.custom)]
+      .map(node => [node.name, node]));
+    const customNames = [...customNodes.keys()].filter(name => !groups.has(name) && !localNodes.includes(name));
+    const sharedNames = new Set(customNames);
+    const dialers = new Map(Object.entries(profile.customNodeDialers || {}));
+    const builtins = [...localNodes, 'DIRECT', 'REJECT', 'PASS'];
     const dialog = document.createElement('dialog');
     dialog.className = 'dialog-box node-picker group-setup-dialog';
     dialog.setAttribute('aria-labelledby', 'groupSetupTitle');
@@ -1589,7 +1604,7 @@
       </div>`}
       <div class="group-tabs group-setup-tabs" role="group" aria-label="候选类型">
         <button type="button" class="group-tab" data-setup-tab="sources" aria-pressed="true">订阅来源</button>
-        <button type="button" class="group-tab" data-setup-tab="groups" aria-pressed="false">固定节点与策略组</button>
+        <button type="button" class="group-tab" data-setup-tab="groups" aria-pressed="false">自定义节点与策略组</button>
       </div>
       <div class="group-setup-scroll">
         <div id="groupSetupSources"></div>
@@ -1615,7 +1630,7 @@
       const count = selectedSources.filter(entry => sourceStatus(entry)).length;
       const references = [...attached].filter(name => !selectedSources.some(entry => entry.names.has(name))).length;
       const total = selectedSources.reduce((sum, entry) => sum + entry.picked.size, 0);
-      dialog.querySelector('.group-setup-summary').textContent = [count && `${count} 家 · ${total} 个节点`, references && `${references} 个组或内置目标`].filter(Boolean).join(' · ');
+      dialog.querySelector('.group-setup-summary').textContent = [count && `${count} 家 · ${total} 个节点`, references && `另选 ${references} 项`].filter(Boolean).join(' · ');
       error.hidden = true;
     }
     let collapseSource;
@@ -1626,25 +1641,46 @@
       }));
     }
     if (!selectedSources.length) sourcePanel.innerHTML = '<p class="empty-message">暂无订阅来源。</p>';
-    for (const [title, names] of [['可引用的策略组', linked.map(group => group.name)], ['固定节点与内置目标', builtins]]) {
+    for (const [title, names] of [['自定义节点', customNames], ['可引用的策略组', linked.map(group => group.name)], ['固定节点与内置目标', builtins]]) {
       const section = document.createElement('section');
       section.className = 'group-setup-references';
-      section.innerHTML = `<h3>${title}</h3>${names.map(name => `
+      section.innerHTML = `<h3>${title}</h3>${names.map(name => {
+        const currentDialer = dialers.get(name) || '';
+        const choices = [...new Set([...localNodes, ...linked.map(group => group.name),
+          ...customNames, currentDialer])].filter(value => value && value !== name);
+        return `
+        <div class="group-setup-reference">
         <label class="group-setup-choice">
           <input type="checkbox" value="${escapeHtml(name)}" ${attached.has(name) ? 'checked' : ''}>
           <span>${escapeHtml(name)}</span>
           ${fixed.has(name) && originalExcluded.has(name) ? '<span class="group-setup-choice-hint">已排除</span>' : ''}
         </label>
-      `).join('') || '<p class="empty-message">暂无可引用的组。</p>'}`;
+        ${sharedNames.has(name) && customNodes.get(name).type !== 'tailscale' ? `<label class="group-setup-dialer" ${attached.has(name) ? '' : 'hidden'}>
+          前置代理（${escapeHtml(profile.name)}）
+          <select class="input-text" data-node-dialer="${escapeHtml(name)}" aria-label="${escapeHtml(name)}的前置代理">
+            <option value="">直接连接</option>
+            ${choices.map(value => `<option value="${escapeHtml(value)}" ${value === currentDialer ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('')}
+          </select>
+        </label>` : ''}
+        </div>`;
+      }).join('') || '<p class="empty-message">暂无可选项。</p>'}`;
       groupPanel.appendChild(section);
     }
     groupPanel.onchange = event => {
       const { checked, value } = event.target;
+      if (event.target.matches('[data-node-dialer]')) {
+        const name = event.target.dataset.nodeDialer;
+        if (value) dialers.set(name, value);
+        else dialers.delete(name);
+        return;
+      }
       if (checked) attached.add(value);
       else attached.delete(value);
       if (!fixed.has(value)) setNodeSelection(pickedOrder, [value], checked);
       const status = event.target.closest('label')?.querySelector('.group-setup-choice-hint');
       if (status) status.hidden = !checked;
+      const dialerField = event.target.closest('.group-setup-reference')?.querySelector('.group-setup-dialer');
+      if (dialerField) dialerField.hidden = !checked;
       showSummary();
     };
     dialog.querySelectorAll('[data-setup-tab]').forEach(button => {
@@ -1662,7 +1698,7 @@
       if (!existing) {
         draft.name = dialog.querySelector('#newGroupName').value.trim();
         draft.type = dialog.querySelector('#newGroupType').value;
-        if (!draft.name || [...groups.keys(), ...builtins, ...reserved].includes(draft.name) ||
+        if (!draft.name || [...groups.keys(), ...builtins, ...customNames, ...reserved].includes(draft.name) ||
             selectedSources.some(entry => entry.names.has(draft.name))) {
           error.textContent = draft.name ? '此名称已被使用，请换一个名称。' : '请输入策略组名称。';
           error.hidden = false;
@@ -1751,6 +1787,7 @@
       if (existing) Object.assign(existing, draft);
       else profile.groups.push(draft);
       profile.sourceIds = nextSourceIds;
+      profile.customNodeDialers = Object.fromEntries(dialers);
       state.selectedGroupId = draft.id;
       state.groupTab = 'nodes';
       dialog.close();
@@ -3400,7 +3437,7 @@
       </div>
       ${progressMarkup}
     `;
-    container.appendChild(headerBar);
+    container.append(headerBar, renderCustomNodesPanel());
 
     headerBar.querySelector('#importNewSourceBtn').onclick = () => {
       promptSourceImportModal(null);
@@ -4279,87 +4316,115 @@
   // 视图 8：设备配置管理
   // ========================================================
 
-  async function saveCustomNode(profile, nodeChange) {
-    if (state.profileWrites.has(profile.id)) throw new Error('该配置正在保存，请稍后重试');
-    const requestedKey = profileContentKey(profile);
-    state.profileWrites.add(profile.id);
-    updateTopbarBadges();
-    try {
-      const response = await fetch('/api/profile/save-draft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profileId: profile.id, revision: profile.revision, updates: draftUpdates(profile), nodeChange })
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || '无法保存自定义节点');
-      if (requestedKey === profileContentKey(profile)) replaceProfile(result.profile);
+  async function saveCustomNode(change) {
+    const response = await fetch('/api/custom-nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...change, revision: state.data.customNodesRevision })
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || '无法保存自定义节点');
+    state.data.customNodes = result.customNodes;
+    state.data.customNodesRevision = result.customNodesRevision;
+    for (const { profile, previousRevision } of result.changedProfiles) {
+      const current = state.data.profiles.find(item => item.id === profile.id);
+      if (current.revision !== previousRevision) continue;
+      if (!getEditState(current).dirty) replaceProfile(profile);
       else {
-        profile.nodes = result.profile.nodes;
-        acceptSavedProfile(profile, result.profile);
+        current.nodes = profile.nodes;
+        acceptSavedProfile(current, profile);
       }
-      if (getCurrentProfile()?.id === profile.id && state.currentView === 'profiles') renderProfilesManageView();
-    } finally {
-      state.profileWrites.delete(profile.id);
-      updateTopbarBadges();
     }
+    updateTopbarBadges();
+    const panel = document.getElementById('customNodesPanel');
+    if (panel) panel.replaceWith(renderCustomNodesPanel());
+    return result.changedProfiles.length;
   }
 
-  function openCustomNodeForm(profile, node) {
-    const dialers = [...new Set([...(profile.nodes || []), ...(profile.groups || [])].map(item => item.name))]
-      .filter(name => name !== node?.name);
+  const customNodeTypes = { http: 'HTTP', socks5: 'SOCKS5', tailscale: 'Tailscale' };
+
+  function catalogNodesFor(profile) {
+    return (state.data.customNodes || []).filter(node => !node.profileId || node.profileId === profile.id);
+  }
+
+  function openCustomNodeForm(node) {
     const dialog = document.createElement('dialog');
-    dialog.className = 'dialog-box custom-node-dialog';
+    const owner = node?.profileId || getCurrentProfile()?.id;
+    const isTailscale = node?.type === 'tailscale';
+    dialog.className = 'dialog-box node-picker custom-node-dialog';
     dialog.setAttribute('aria-labelledby', 'customNodeTitle');
     dialog.innerHTML = `
-      <form>
+      <form class="group-setup-form">
         <div class="dialog-header"><h2 class="panel-title" id="customNodeTitle">${node ? '编辑自定义节点' : '添加自定义节点'}</h2></div>
         <div class="dialog-body custom-node-fields">
           <label>节点名称<input class="input-text" name="nodeName" required maxlength="128" ${node ? 'readonly' : 'autofocus'}
             value="${escapeHtml(node?.name || '')}"></label>
-          <label>代理协议<select class="input-text" name="protocol">
-            <option value="http">HTTP</option><option value="socks5" ${node?.type === 'socks5' ? 'selected' : ''}>SOCKS5</option>
+          <label>节点类型<select class="input-text" name="protocol" ${isTailscale ? 'disabled' : ''}>
+            ${Object.entries(customNodeTypes).map(([value, label]) =>
+              `<option value="${value}" ${node?.type === value ? 'selected' : ''}
+                ${node && !isTailscale && value === 'tailscale' ? 'disabled' : ''}>${label}</option>`).join('')}
           </select></label>
-          <label>主机名或 IP<input class="input-text" name="server" required maxlength="253"
+          <label data-node-fields="tailscale">所属设备配置<select class="input-text" name="profileId" required>
+            ${state.data.profiles.map(item => `<option value="${escapeHtml(item.id)}" ${owner === item.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}
+          </select></label>
+          <label data-node-fields="tailscale">Tailscale 设备名<input class="input-text" name="hostname" required maxlength="63"
+            autocapitalize="none" spellcheck="false" pattern="[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?"
+            value="${escapeHtml(node?.hostname || '')}" placeholder="例如 workbench-phone"></label>
+          <p class="custom-node-login-hint" data-node-fields="tailscale">首次有流量走这个节点时，从客户端日志打开登录链接，在浏览器授权。</p>
+          <label data-node-fields="proxy">主机名或 IP<input class="input-text" name="server" required maxlength="253"
             value="${escapeHtml(node?.server || '')}" placeholder="proxy.example.invalid"></label>
-          <label>端口<input class="input-text" type="number" name="port" min="1" max="65535" required value="${escapeHtml(String(node?.port ?? ''))}"></label>
-          <label>用户名（可选）<input class="input-text" name="username" autocomplete="off"
+          <label data-node-fields="proxy">端口<input class="input-text" type="number" name="port" min="1" max="65535" required value="${escapeHtml(String(node?.port ?? ''))}"></label>
+          <label data-node-fields="proxy">用户名（可选）<input class="input-text" name="username" autocomplete="off"
             value="${escapeHtml(node?.username || '')}"></label>
-          <label>密码（可选）<input class="input-text" name="password" type="password" autocomplete="new-password"
+          <label data-node-fields="proxy">密码（可选）<input class="input-text" name="password" type="password" autocomplete="new-password"
             ${node?.hasPassword ? 'placeholder="留空保留原密码"' : ''}></label>
-          <label class="custom-node-dialer">前置代理（可选）<select class="input-text" name="dialerProxy">
-            <option value="">直接连代理地址</option>
-            ${dialers.map(name => `<option value="${escapeHtml(name)}" ${name === node?.dialerProxy ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}
-          </select></label>
           ${node?.hasPassword ? '<label class="custom-node-clear"><input type="checkbox" name="clearPassword"> 清除原密码</label>' : ''}
           <p class="group-setup-error" role="alert" hidden></p>
         </div>
         <div class="dialog-footer">
           <button type="button" class="btn btn-default close-modal">取消</button>
-          <button type="submit" class="btn btn-primary">保存到草稿</button>
+          <button type="submit" class="btn btn-primary">保存节点</button>
         </div>
       </form>`;
     const form = dialog.querySelector('form');
     const submit = form.querySelector('[type=submit]');
     const error = form.querySelector('[role=alert]');
+    const protocol = form.elements.namedItem('protocol');
+    function syncFields() {
+      const kind = protocol.value === 'tailscale' ? 'tailscale' : 'proxy';
+      for (const field of form.querySelectorAll('[data-node-fields]')) {
+        field.hidden = field.dataset.nodeFields !== kind;
+        const control = field.querySelector('input, select');
+        if (control) control.disabled = field.hidden || (isTailscale && control.name === 'profileId');
+      }
+      error.hidden = true;
+    }
+    protocol.onchange = syncFields;
+    syncFields();
     form.onsubmit = async event => {
       event.preventDefault();
       const data = new FormData(form);
       submit.disabled = true;
       error.hidden = true;
       try {
-        await saveCustomNode(profile, {
-          action: node ? 'edit' : 'add',
-          name: data.get('nodeName').trim(),
-          type: data.get('protocol'),
+        const connection = protocol.value === 'tailscale' ? {
+          profileId: isTailscale ? node.profileId : data.get('profileId'),
+          hostname: data.get('hostname').trim()
+        } : {
           server: data.get('server').trim().replace(/^\[([^\]]+)\]$/, '$1'),
           port: Number(data.get('port')),
           username: data.get('username'),
           password: data.get('password'),
-          dialerProxy: data.get('dialerProxy'),
           clearPassword: data.has('clearPassword')
+        };
+        const changed = await saveCustomNode({
+          action: node ? 'edit' : 'add',
+          name: data.get('nodeName').trim(),
+          type: protocol.value,
+          ...connection
         });
         dialog.close();
-        showToast('自定义节点已保存到草稿', 'success');
+        showToast(changed ? `已更新 ${changed} 份草稿，发布后生效` : '自定义节点已保存', 'success');
       } catch (err) {
         error.textContent = err.message;
         error.hidden = false;
@@ -4370,17 +4435,88 @@
     dialog.querySelector('.close-modal').onclick = () => dialog.close();
     dialog.addEventListener('close', () => {
       dialog.remove();
-      document.getElementById('addCustomNodeBtn')?.focus();
+      const card = node && document.querySelector(`.custom-node-card[data-node-name="${CSS.escape(node.name)}"]`);
+      (card?.querySelector('.node-more') || document.getElementById('addCustomNodeBtn'))?.focus();
     });
     el.modalContainer.appendChild(dialog);
     dialog.showModal();
+  }
+
+  function renderCustomNodesPanel() {
+    const customNodes = state.data.customNodes || [];
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = `
+        <section id="customNodesPanel" class="panel">
+          <div class="panel-header">
+            <span class="panel-title">自定义节点</span>
+            <button id="addCustomNodeBtn" class="btn btn-primary btn-sm">+ 添加节点</button>
+          </div>
+          <div class="panel-body">
+            ${customNodes.length ? '<div class="custom-node-grid"></div>' :
+              '<p class="group-setup-choice-hint">添加节点后，可在设备的策略组里选用。</p>'}
+          </div>
+        </section>`;
+    const container = wrapper.firstElementChild;
+    container.querySelector('#addCustomNodeBtn').onclick = () => openCustomNodeForm();
+    const grid = container.querySelector('.custom-node-grid');
+    for (const node of customNodes) {
+      const card = document.createElement('div');
+      card.className = 'node-item custom-node-card';
+      card.dataset.nodeName = node.name;
+      card.dataset.nodeType = node.type;
+      const name = escapeHtml(node.name);
+      const isTailscale = node.type === 'tailscale';
+      const owner = isTailscale && state.data.profiles.find(item => item.id === node.profileId);
+      const host = node.server?.includes(':') ? `[${node.server}]` : node.server;
+      const endpoint = escapeHtml(isTailscale ? node.hostname : `${host}:${node.port}`);
+      card.innerHTML = `
+        <div class="group-node-title">
+          <strong class="node-name" title="${name}">${name}</strong>
+          <button class="btn btn-subtle node-more" type="button" aria-expanded="false" aria-label="${name}的操作" title="节点操作">${moreIcon}</button>
+        </div>
+        <div class="custom-node-meta">
+          <span class="custom-node-type">${escapeHtml(customNodeTypes[node.type] || node.type)}</span>
+          <span class="custom-node-endpoint" title="${endpoint}">${endpoint}</span>
+        </div>
+        ${owner ? `<span class="custom-node-owner" title="${escapeHtml(owner.name)}">${escapeHtml(owner.name)}</span>` : ''}
+        <div class="group-node-popover custom-node-actions" popover="auto" role="group" aria-label="${name}的操作">
+          <button type="button" class="btn btn-subtle custom-node-edit">编辑</button>
+          <button type="button" class="btn btn-subtle custom-node-remove">移除</button>
+        </div>`;
+      const more = card.querySelector('.node-more');
+      const popover = card.querySelector('.custom-node-actions');
+      const remove = card.querySelector('.custom-node-remove');
+      more.onclick = () => popover.matches(':popover-open') ? popover.hidePopover() : openNodePopover(popover, more);
+      popover.addEventListener('toggle', event => more.setAttribute('aria-expanded', String(event.newState === 'open')));
+      card.querySelector('.custom-node-edit').onclick = () => {
+        popover.hidePopover();
+        openCustomNodeForm(node);
+      };
+      remove.onclick = async () => {
+        popover.hidePopover();
+        more.focus();
+        if (!confirm(`移除「${node.name}」？`)) return;
+        more.disabled = true;
+        try {
+          await saveCustomNode({ action: 'remove', name: node.name });
+          document.getElementById('addCustomNodeBtn')?.focus();
+          showToast('自定义节点已移除', 'success');
+        } catch (error) {
+          showToast(error.message, 'error');
+        } finally {
+          more.disabled = false;
+          if (more.isConnected) more.focus();
+        }
+      };
+      grid.appendChild(card);
+    }
+    return container;
   }
 
   function renderProfilesManageView() {
     el.mainStage.innerHTML = '';
     const profiles = state.data.profiles || [];
     const current = getCurrentProfile();
-    const customNodes = (current?.nodes || []).filter(node => node.custom);
     const container = document.createElement('div');
     container.style.display = 'flex';
     container.style.flexDirection = 'column';
@@ -4415,44 +4551,8 @@
           </div>
         </div>
       </div>
-      ${current ? `
-        <section class="panel">
-          <div class="panel-header">
-            <span class="panel-title">自定义节点 · ${escapeHtml(current.name)}</span>
-            <button id="addCustomNodeBtn" class="btn btn-primary btn-sm">+ 添加节点</button>
-          </div>
-          <div class="panel-body">
-            ${customNodes.length ? customNodes.map((node, index) => `
-              <div class="custom-node-row">
-                <div><strong>${escapeHtml(node.name)}</strong>
-                  <div class="group-setup-choice-hint">${escapeHtml(node.type.toUpperCase())} · ${escapeHtml(node.server)} · ${node.port}</div>
-                </div>
-                <button type="button" class="btn btn-default btn-sm" data-node-edit="${index}">编辑</button>
-                <button type="button" class="btn btn-default btn-sm" data-node-remove="${index}">移除</button>
-              </div>`).join('') : '<p class="group-setup-choice-hint">可添加已有的 HTTP 或 SOCKS5 代理，再到策略组配置候选节点。</p>'}
-          </div>
-        </section>` : ''}
     `;
 
-    container.querySelector('#addCustomNodeBtn')?.addEventListener('click', () => openCustomNodeForm(current));
-    container.querySelectorAll('[data-node-edit]').forEach(button => {
-      button.onclick = () => openCustomNodeForm(current, customNodes[Number(button.dataset.nodeEdit)]);
-    });
-    container.querySelectorAll('[data-node-remove]').forEach(button => {
-      button.onclick = async () => {
-        const node = customNodes[Number(button.dataset.nodeRemove)];
-        if (!confirm(`从草稿移除「${node.name}」？`)) return;
-        button.disabled = true;
-        try {
-          await saveCustomNode(current, { action: 'remove', name: node.name });
-          showToast('自定义节点已从草稿移除', 'success');
-        } catch (error) {
-          showToast(error.message, 'error');
-        } finally {
-          button.disabled = false;
-        }
-      };
-    });
     const compareProfiles = container.querySelector('#compareProfilesBtn');
     if (compareProfiles) compareProfiles.onclick = () => openProfileComparison(compareProfiles);
     container.querySelectorAll('.btn-switch-p').forEach(btn => {
@@ -4629,6 +4729,7 @@
       }
     };
   });
+  el.mobileViewSelect.value = state.currentView;
   el.mobileViewSelect.onchange = event => navigateTo(event.target.value);
 
   el.profileSelect.onchange = () => {

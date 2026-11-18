@@ -221,6 +221,25 @@ def main():
         except Problem as error:
             raise ValueError(str(error)) from None
         print(json.dumps(detail, ensure_ascii=False))
+    elif action == 'custom-nodes':
+        from backend.custom_nodes import change_catalog, migrate_profiles, select_nodes
+        from backend.store import Problem
+        from workbench_api import retarget_references
+        operation = request['operation']
+        try:
+            if operation == 'migrate':
+                profiles = request['profiles']
+                output = {'nodes': migrate_profiles(profiles, retarget_references), 'profiles': profiles}
+            elif operation == 'change':
+                profiles = request['profiles']
+                output = {'nodes': change_catalog(request['nodes'], profiles, request['change']), 'profiles': profiles}
+            elif operation == 'select':
+                output = select_nodes(request['profile'], request['nodes'], request.get('dialers'))
+            else:
+                raise ValueError('不支持的自定义节点操作')
+        except Problem as error:
+            raise ValueError(str(error)) from None
+        print(json.dumps(output, ensure_ascii=False))
     elif action == 'compare':
         def compile_draft(profile, sources, company):
             result, document = compile_profile(prepare_profile(profile, sources), sources, company)

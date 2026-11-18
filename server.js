@@ -7,7 +7,6 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
-const { isIPv6 } = require('node:net');
 const { execFile, spawn, spawnSync } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
@@ -66,7 +65,15 @@ function initStore() {
 function readStore() {
   try {
     const raw = fs.readFileSync(STORE_PATH, 'utf-8');
-    return JSON.parse(raw);
+    const store = JSON.parse(raw);
+    if (!store.customNodes && store.profiles.some(profile => profile.customNodeNames?.length)) {
+      const migrated = privateBackend('custom-nodes', { operation: 'migrate', profiles: store.profiles });
+      store.customNodes = migrated.nodes;
+      store.customNodesRevision = 1;
+      store.profiles = migrated.profiles;
+      if (!writeStore(store)) throw new Error('无法迁移自定义节点');
+    }
+    return store;
   } catch (err) {
     console.error('[Store] 读取失败:', err);
     return null;
@@ -200,59 +207,26 @@ function publicProfile(profile) {
   const managed = new Set(customNodeNames);
   return {
     ...display,
-    nodes: (profile.nodes || []).map(({ name, type, server, port, username = '', password, 'dialer-proxy': dialerProxy = '' }) =>
-      managed.has(name) ? { name, type, custom: true, server, port, username, dialerProxy, hasPassword: Boolean(password) } : { name, type }),
+    customNodeDialers: Object.fromEntries((profile.nodes || []).filter(node => managed.has(node.name) && node['dialer-proxy'])
+      .map(node => [node.name, node['dialer-proxy']])),
+    nodes: (profile.nodes || []).map(({ name, type, hostname, profileId, server, port, username = '', password, 'dialer-proxy': dialerProxy = '' }) => {
+      if (!managed.has(name)) return { name, type };
+      return type === 'tailscale' ? { name, type, custom: true, hostname, profileId }
+        : { name, type, custom: true, server, port, username, dialerProxy, hasPassword: Boolean(password) };
+    }),
     groups: (profile.groups || []).map(({ extra, ...group }) => group)
   };
 }
 
-function applyNodeChange(profile, change) {
-  if (!change || !['add', 'edit', 'remove'].includes(change.action)) throw new Error('自定义节点操作无效');
-  const { action, name, type, server, port, username = '', password = '' } = change;
-  if (typeof name !== 'string' || !/^[^,#&\r\n]{1,128}$/.test(name) || name !== name.trim()) {
-    throw new Error('请输入有效的节点名称');
-  }
-  const nodes = profile.nodes || [];
-  const groups = profile.groups || [];
-  const managed = new Set(profile.customNodeNames || []);
-  const previous = nodes.find(node => node.name === name);
-  if (action === 'add') {
-    const reserved = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL'];
-    if (previous || reserved.includes(name) || groups.some(group => group.name === name)) {
-      throw new Error('节点或策略组名称已存在');
-    }
-  } else if (!previous || !managed.has(name)) {
-    throw new Error('找不到该自定义节点');
-  }
-  if (action === 'remove') {
-    if (groups.some(group => group.members?.includes(name)) || profile.rules?.some(rule => rule.target === name)
-        || nodes.some(node => node['dialer-proxy'] === name)) {
-      throw new Error('请先解除策略组、规则或其他节点对该节点的引用');
-    }
-    profile.nodes = nodes.filter(node => node.name !== name);
-    managed.delete(name);
-  } else {
-    if (!['http', 'socks5'].includes(type) || typeof server !== 'string' || !/^[a-zA-Z0-9_.:-]{1,253}$/.test(server)) {
-      throw new Error('请选择 HTTP 或 SOCKS5，并填写主机名或 IP');
-    }
-    if (server.includes(':') && !isIPv6(server)) throw new Error('IPv6 地址格式无效');
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口须在 1 到 65535 之间');
-    if (typeof username !== 'string' || typeof password !== 'string') throw new Error('节点认证信息格式无效');
-    const updated = { ...(previous || {}), name, type, server, port };
-    const dialer = change.dialerProxy ?? '';
-    if (typeof dialer !== 'string' || (dialer && (dialer === name || ![...nodes, ...groups].some(item => item.name === dialer)))) {
-      throw new Error('前置代理不存在或指向自身');
-    }
-    if (dialer) updated['dialer-proxy'] = dialer;
-    else delete updated['dialer-proxy'];
-    if (username) updated.username = username;
-    else delete updated.username;
-    if (password) updated.password = password;
-    else if (change.clearPassword === true) delete updated.password;
-    profile.nodes = previous ? nodes.map(node => node === previous ? updated : node) : [...nodes, updated];
-    managed.add(name);
-  }
-  profile.customNodeNames = [...managed].sort();
+function customNodesData(store) {
+  const nodes = store.customNodes || [];
+  const profile = { nodes, customNodeNames: nodes.map(node => node.name) };
+  return { customNodes: publicProfile(profile).nodes, customNodesRevision: store.customNodesRevision || 1 };
+}
+
+function selectCustomNodes(store, profile, dialers) {
+  if (!store.customNodes?.length && !profile.customNodeNames?.length) return profile;
+  return privateBackend('custom-nodes', { operation: 'select', nodes: store.customNodes || [], profile, dialers });
 }
 
 function publishedSnapshot(store, profile) {
@@ -606,7 +580,7 @@ const server = http.createServer(async (req, res) => {
       hasDraft: hasPublishableDraft(store, profile)
     }));
     const common = {
-      sources, profiles, company: store.company, liveData: store.liveData,
+      sources, profiles, company: store.company, liveData: store.liveData, ...customNodesData(store),
       nodeProbeAvailable: canMeasure(store),
     };
     if (parsedUrl.query.view === 'bootstrap') {
@@ -767,6 +741,30 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (method === 'POST' && pathname === '/api/custom-nodes') {
+    try {
+      const change = await parseBody(req);
+      const store = readStore();
+      const revision = store.customNodesRevision || 1;
+      if (change.revision !== revision) return sendJson(res, 409, { error: '自定义节点已在其他页面更新，请刷新再试。' });
+      const result = privateBackend('custom-nodes', {
+        operation: 'change', nodes: store.customNodes || [], profiles: store.profiles, change
+      });
+      store.customNodes = result.nodes;
+      store.customNodesRevision = revision + 1;
+      const changedProfiles = result.profiles.flatMap((profile, index) => {
+        if (profileContentKey(profile) === profileContentKey(store.profiles[index])) return [];
+        profile.hasDraft = hasPublishableDraft(store, profile);
+        return [{ profile: publicProfile(profile) }];
+      });
+      store.profiles = result.profiles;
+      if (!writeStore(store)) return sendJson(res, 500, { error: '无法保存自定义节点' });
+      return sendJson(res, 200, { ...customNodesData(store), changedProfiles });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
   // 3. 保存草稿 (只改变草稿，绝不影响已发布的快照与下载)
   if (method === 'POST' && pathname === '/api/profile/save-draft') {
     try {
@@ -778,8 +776,9 @@ const server = http.createServer(async (req, res) => {
       }
 
       const current = store.profiles[profileIdx];
-      const merged = mergeDraft(current, updates, store.publicRuleLibrary, publishedSnapshot(store, current)?.profile);
-      if (nodeChange !== undefined) applyNodeChange(merged, nodeChange);
+      if (nodeChange !== undefined) return sendJson(res, 400, { error: '请在「订阅源与节点」管理自定义节点' });
+      const merged = selectCustomNodes(store, mergeDraft(current, updates, store.publicRuleLibrary,
+        publishedSnapshot(store, current)?.profile), updates?.customNodeDialers);
       const hasDraft = hasPublishableDraft(store, merged);
       if (profileContentKey(merged) === profileContentKey(current)) {
         return sendJson(res, 200, { success: true, profile: publicProfile({ ...current, hasDraft }) });
@@ -843,7 +842,8 @@ const server = http.createServer(async (req, res) => {
       }
 
       const current = store.profiles[profileIdx];
-      const targetState = mergeDraft(current, currentProfile, store.publicRuleLibrary, publishedSnapshot(store, current)?.profile);
+      const targetState = selectCustomNodes(store, mergeDraft(current, currentProfile, store.publicRuleLibrary,
+        publishedSnapshot(store, current)?.profile), currentProfile?.customNodeDialers);
 
       // 服务端严格校验
       const validation = serverValidateProfile(targetState);
