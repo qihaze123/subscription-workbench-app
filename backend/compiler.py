@@ -370,8 +370,8 @@ def compile_profile(profile, sources, company):
                     rules.append(f"{ip_kind},{cidr},{target}" + (',no-resolve' if r.get('noResolve', True) else ''))
                 except ValueError:
                     errors.append(issue(path, f"公司网段不合法：{cidr}"))
-            if not company.get("connected"):
-                warnings.append(issue(path, "MoVPN 来源当前不可用，使用上次有效网段；请检查共享公司网络页面"))
+            if not cidrs:
+                warnings.append(issue(path, "旧版共享网段为空；请添加独立的 IP-CIDR 规则"))
         elif kind == "MATCH":
             seen_match = True
             rules.append(f"MATCH,{target}")

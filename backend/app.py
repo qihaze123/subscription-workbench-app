@@ -17,7 +17,6 @@ from . import ip_reputation
 
 from .compiler import compile_profile, dump_yaml, import_config, parse_yaml, selector_regex_matches, summarize_group_members
 from .store import Problem, Store
-from .local_data import MOVPN
 from .distribution import DATA_DIR, load_config, public_metadata, start_server
 from .rule_templates import catalog, load_template, refresh_catalog
 from workbench_api import WorkbenchAPI, gzip_for_ui
@@ -185,11 +184,6 @@ def handler_for(store, static_dir=None, distribution=None, tailnet_admin=None, n
                     return self.json(store.save_sources(data.get("sources"), data.get("revision")))
                 if path == "/api/compare" and method == "POST":
                     return self.json(store.compare(data))
-                if path == '/api/company/sync' and method == 'POST':
-                    try:return self.json(store.sync_company(publish=data.get('publish',False),auto_publish=data.get('autoPublish')))
-                    except Problem:
-                        store.mark_sync_failed()
-                        raise
                 if path == '/api/company' and method == 'GET':
                     with store.lock:return self.json(store._get('company'))
                 if path == "/api/import" and method == "POST":
@@ -278,14 +272,6 @@ def main():
     if probe_core := os.environ.get("WORKBENCH_FLCLASH_CORE"):
         from .node_probe import NodeProbes
         node_probes = NodeProbes(store, probe_core)
-    stop=threading.Event()
-    def watch_company():
-        while not stop.wait(10):
-            try:store.sync_company()
-            except Exception:store.mark_sync_failed()
-    watcher=threading.Thread(target=watch_company,daemon=True)
-    if MOVPN is not None:
-        watcher.start()
     download_server=start_server(store,distribution) if distribution else None
     if download_server:
         threading.Thread(target=download_server.serve_forever,daemon=True).start()
@@ -302,9 +288,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()
-        if MOVPN is not None:
-            watcher.join(timeout=3)
         if download_server:
             download_server.shutdown()
             download_server.server_close()

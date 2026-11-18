@@ -7,6 +7,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const { isIPv6 } = require('node:net');
 const { execFile, spawn, spawnSync } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
@@ -195,12 +196,63 @@ function startNodeMeasurement(scope) {
 }
 
 function publicProfile(profile) {
-  const { extras, ...display } = profile;
+  const { extras, customNodeNames = [], ...display } = profile;
+  const managed = new Set(customNodeNames);
   return {
     ...display,
-    nodes: (profile.nodes || []).map(({ name, type }) => ({ name, type })),
+    nodes: (profile.nodes || []).map(({ name, type, server, port, username = '', password, 'dialer-proxy': dialerProxy = '' }) =>
+      managed.has(name) ? { name, type, custom: true, server, port, username, dialerProxy, hasPassword: Boolean(password) } : { name, type }),
     groups: (profile.groups || []).map(({ extra, ...group }) => group)
   };
+}
+
+function applyNodeChange(profile, change) {
+  if (!change || !['add', 'edit', 'remove'].includes(change.action)) throw new Error('自定义节点操作无效');
+  const { action, name, type, server, port, username = '', password = '' } = change;
+  if (typeof name !== 'string' || !/^[^,#&\r\n]{1,128}$/.test(name) || name !== name.trim()) {
+    throw new Error('请输入有效的节点名称');
+  }
+  const nodes = profile.nodes || [];
+  const groups = profile.groups || [];
+  const managed = new Set(profile.customNodeNames || []);
+  const previous = nodes.find(node => node.name === name);
+  if (action === 'add') {
+    const reserved = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL'];
+    if (previous || reserved.includes(name) || groups.some(group => group.name === name)) {
+      throw new Error('节点或策略组名称已存在');
+    }
+  } else if (!previous || !managed.has(name)) {
+    throw new Error('找不到该自定义节点');
+  }
+  if (action === 'remove') {
+    if (groups.some(group => group.members?.includes(name)) || profile.rules?.some(rule => rule.target === name)
+        || nodes.some(node => node['dialer-proxy'] === name)) {
+      throw new Error('请先解除策略组、规则或其他节点对该节点的引用');
+    }
+    profile.nodes = nodes.filter(node => node.name !== name);
+    managed.delete(name);
+  } else {
+    if (!['http', 'socks5'].includes(type) || typeof server !== 'string' || !/^[a-zA-Z0-9_.:-]{1,253}$/.test(server)) {
+      throw new Error('请选择 HTTP 或 SOCKS5，并填写主机名或 IP');
+    }
+    if (server.includes(':') && !isIPv6(server)) throw new Error('IPv6 地址格式无效');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口须在 1 到 65535 之间');
+    if (typeof username !== 'string' || typeof password !== 'string') throw new Error('节点认证信息格式无效');
+    const updated = { ...(previous || {}), name, type, server, port };
+    const dialer = change.dialerProxy ?? '';
+    if (typeof dialer !== 'string' || (dialer && (dialer === name || ![...nodes, ...groups].some(item => item.name === dialer)))) {
+      throw new Error('前置代理不存在或指向自身');
+    }
+    if (dialer) updated['dialer-proxy'] = dialer;
+    else delete updated['dialer-proxy'];
+    if (username) updated.username = username;
+    else delete updated.username;
+    if (password) updated.password = password;
+    else if (change.clearPassword === true) delete updated.password;
+    profile.nodes = previous ? nodes.map(node => node === previous ? updated : node) : [...nodes, updated];
+    managed.add(name);
+  }
+  profile.customNodeNames = [...managed].sort();
 }
 
 function publishedSnapshot(store, profile) {
@@ -718,7 +770,7 @@ const server = http.createServer(async (req, res) => {
   // 3. 保存草稿 (只改变草稿，绝不影响已发布的快照与下载)
   if (method === 'POST' && pathname === '/api/profile/save-draft') {
     try {
-      const { profileId, updates } = await parseBody(req);
+      const { profileId, updates, nodeChange } = await parseBody(req);
       const store = readStore();
       const profileIdx = store.profiles.findIndex(p => p.id === profileId);
       if (profileIdx === -1) {
@@ -727,6 +779,7 @@ const server = http.createServer(async (req, res) => {
 
       const current = store.profiles[profileIdx];
       const merged = mergeDraft(current, updates, store.publicRuleLibrary, publishedSnapshot(store, current)?.profile);
+      if (nodeChange !== undefined) applyNodeChange(merged, nodeChange);
       const hasDraft = hasPublishableDraft(store, merged);
       if (profileContentKey(merged) === profileContentKey(current)) {
         return sendJson(res, 200, { success: true, profile: publicProfile({ ...current, hasDraft }) });

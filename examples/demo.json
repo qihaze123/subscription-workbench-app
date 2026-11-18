@@ -81,8 +81,8 @@
         },
         {
           "id": "corp",
-          "type": "COMPANY",
-          "value": "",
+          "type": "IP-CIDR",
+          "value": "192.0.2.0/24",
           "target": "🏢 公司内网",
           "noResolve": true,
           "enabled": true
@@ -194,8 +194,8 @@
         },
         {
           "id": "corp",
-          "type": "COMPANY",
-          "value": "",
+          "type": "IP-CIDR",
+          "value": "192.0.2.0/24",
           "target": "🏢 公司内网",
           "noResolve": true,
           "enabled": true
@@ -418,8 +418,8 @@
             },
             {
               "id": "corp",
-              "type": "COMPANY",
-              "value": "",
+              "type": "IP-CIDR",
+              "value": "192.0.2.0/24",
               "target": "🏢 公司内网",
               "noResolve": true,
               "enabled": true
@@ -543,8 +543,8 @@
             },
             {
               "id": "corp",
-              "type": "COMPANY",
-              "value": "",
+              "type": "IP-CIDR",
+              "value": "192.0.2.0/24",
               "target": "🏢 公司内网",
               "noResolve": true,
               "enabled": true

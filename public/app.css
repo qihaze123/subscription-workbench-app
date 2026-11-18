@@ -1247,6 +1247,23 @@ body:has(> .profile-compare-page) > :is(.topbar, .app-container) { display: none
 .group-setup-references { padding: 8px 0; }
 .group-setup-error { flex-basis: 100%; color: #fca5a5; font-size: 12px; margin: 0; }
 
+.custom-node-dialog { width: min(520px, 94vw); }
+.custom-node-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.custom-node-fields label { display: grid; gap: 4px; font-size: 13px; }
+.custom-node-fields .input-text { min-width: 0; }
+.custom-node-dialer { grid-column: 1 / -1; }
+.custom-node-fields .custom-node-clear { display: flex; align-items: center; grid-column: 1 / -1; }
+.custom-node-fields [role=alert] { grid-column: 1 / -1; }
+.custom-node-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  overflow-wrap: anywhere;
+}
+.custom-node-row + .custom-node-row { border-top: 1px solid var(--border-subtle); }
+
 .group-rule-picker:not(.is-manual) { height: min(37rem, 83dvh); }
 .rule-picker-catalog { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .rule-picker-filter { display: flex; align-items: center; gap: 8px; padding: 12px 16px 7px; }

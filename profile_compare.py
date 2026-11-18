@@ -379,6 +379,15 @@ def make_draft_review(comparison, published, current, frozen):
     def list_action(item, field, old, new, *, positions=True, label='恢复此项'):
         def apply(draft):
             restore_list_item(draft.setdefault(field, []), baseline.get(field, []), old, new, positions)
+            if field == 'nodes':
+                managed = set(draft.get('customNodeNames', []))
+                name = item['nodeName']
+                if name in baseline.get('customNodeNames', []):
+                    managed.add(name)
+                else:
+                    managed.discard(name)
+                if managed or 'customNodeNames' in draft:
+                    draft['customNodeNames'] = sorted(managed)
         assign(item, (field, old, new), apply, label)
 
     if published.get('name') != current.get('name'):

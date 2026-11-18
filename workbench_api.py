@@ -8,7 +8,8 @@ import urllib.parse
 from pathlib import Path
 from uuid import uuid4
 
-from backend.compiler import compile_profile as compile_clash, dump_yaml, parse_yaml
+from backend.compiler import compile_profile as compile_clash, parse_yaml
+from backend.custom_nodes import apply_node_change, public_node
 from backend.distribution import public_metadata
 from backend.local_data import hydrate
 from backend.rule_templates import catalog, load_template
@@ -22,19 +23,6 @@ from workbench_probe import WorkbenchProbe
 
 def compile_profile(profile, sources, company):
     return compile_clash(prepare_profile(profile, sources), sources, company)
-
-
-def update_company_snapshot(previous, body, sources, company):
-    frozen = parse_yaml(previous['yaml'])
-    old, before = compile_profile(body, sources, json.loads(previous['company']))
-    updated, after = compile_profile(body, sources, company)
-    if not old['ok'] or not updated['ok']:
-        return updated if not updated['ok'] else old
-    if frozen.get('rules') != before['rules']:
-        raise Problem('公司网段更新无法与历史规则对齐，已保留上次发布版本。', 409)
-    frozen['rules'] = after['rules']
-    stats = {**json.loads(previous['stats']), 'rules': len(after['rules'])}
-    return {**updated, 'yaml': dump_yaml(frozen), 'stats': stats}
 
 
 def normalize_profile(profile):
@@ -101,7 +89,8 @@ def reconcile_group_names(profile, *baselines):
 def public_profile(profile):
     result = normalize_profile(profile)
     result.pop('extras', None)
-    result['nodes'] = [{key: node.get(key) for key in ('name', 'type')} for node in result.get('nodes', [])]
+    managed = set(result.pop('customNodeNames', []))
+    result['nodes'] = [public_node(node, managed) for node in result.get('nodes', [])]
     for group in result.get('groups', []):
         previous = (group.get('extra') or {}).get('tolerance')
         if type(previous) is int and 'tolerance' not in group.get('options', {}):
@@ -338,6 +327,8 @@ class WorkbenchAPI:
             published = json.loads(store._version(pid, row['published'])['body']) if row['published'] else None
             target = self.merge(current, data.get('updates') if action == 'save-draft' else data.get('currentProfile'), published)
             if action == 'save-draft':
+                if 'nodeChange' in data:
+                    apply_node_change(target, data['nodeChange'])
                 store.save(pid, target, row['revision'])
                 return {'profile': self.profile_status(store._row(pid))}
             sources, company = store._get('sources'), store._get('company')

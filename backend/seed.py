@@ -63,7 +63,7 @@ def seed_profiles():
             ],
             "rules": [
                 rule("mesh", "DOMAIN", "device-01.mesh.example", "工作台 Tailscale"),
-                rule("corp", "COMPANY", "", "🏢 公司内网", True),
+                rule("corp", "IP-CIDR", "192.0.2.0/24", "🏢 公司内网", True),
                 rule("last", "MATCH", "", "日常流量"),
             ],
             "network": {"dns": {"enable": False}, "tun": {"enable": False}},

@@ -137,50 +137,6 @@ class Store:
                     "sources": self.sources(), "sourcesRevision": self._get("sourcesRevision"),
                     "company": self._get("company"), "capabilities": {"coreValidation": False, "liveSync": self.local_mode}, "syncError": self.sync_error}
 
-    def mark_sync_failed(self):
-        with self.lock,self.db:
-            current=self._get('company')
-            current.update(connected=False,checkedAt=now(),error='共享网段同步未通过检查，保留上次有效快照和发布版本；请核对来源及配置引用。')
-            self._set('company',current)
-
-    def sync_company(self, publish=False, auto_publish=None, path=None):
-        if not isinstance(publish,bool) or (auto_publish is not None and not isinstance(auto_publish,bool)):
-            raise Problem('同步与自动发布开关必须是布尔值',422)
-        from .local_data import company_from_movpn, MOVPN
-        try:
-            fresh = company_from_movpn(path or MOVPN)
-        except Exception:
-            with self.lock, self.db:
-                old = self._get('company')
-                old.update(connected=False, checkedAt=now(),error='MoVPN 网段读取失败，保留上次有效数据与已发布订阅')
-                self._set('company',old)
-            raise Problem(old['error'],422)
-        with self.lock, self.db:
-            old = self._get('company')
-            changed = old.get('cidrs') != fresh['cidrs'] or old.get('profileId') != fresh['profileId']
-            fresh.update(revision=old.get('revision',0)+int(changed),autoPublish=old.get('autoPublish',False) if auto_publish is None else bool(auto_publish),
-                         updatedAt=fresh['updatedAt'] if changed else old.get('updatedAt'),
-                         lastChange={'added':[c for c in fresh['cidrs'] if c not in old.get('cidrs',[])],'removed':[c for c in old.get('cidrs',[]) if c not in fresh['cidrs']]} if changed else old.get('lastChange',{'added':[],'removed':[]}))
-            self._set('company',fresh)
-            published = []
-            if publish or (changed and fresh['autoPublish']):
-                # Republish reviewed published bodies only, never unsaved drafts.
-                for row in list(self.db.execute('SELECT * FROM profiles WHERE published IS NOT NULL')):
-                    previous = self._version(row['id'],row['published'])
-                    body = json.loads(previous['body'])
-                    reviewed_sources=json.loads(previous['sources'])
-                    if not any(r.get('type')=='COMPANY' for r in body.get('rules',[])):continue
-                    from workbench_api import update_company_snapshot
-                    result=update_company_snapshot(previous,body,reviewed_sources,fresh)
-                    if not result['ok']:raise Problem('共享网段发布校验失败，全部保持上一版本',422,errors=result['errors'])
-                    from .local_data import hydrate
-                    hydrate(yaml_value(result['yaml']))
-                    version=self.db.execute('SELECT max(version) FROM versions WHERE profile_id=?',(row['id'],)).fetchone()[0]+1
-                    self.db.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?,?)',(row['id'],version,now(),previous['body'],result['yaml'],js(result['stats']),previous['sources'],js(fresh)))
-                    self.db.execute('UPDATE profiles SET published=?,revision=revision+1,updated=? WHERE id=?',(version,now(),row['id']))
-                    published.append({'id':row['id'],'version':version})
-            return {'company':fresh,'changed':changed,'published':published}
-
     def create(self, raw):
         if not isinstance(raw, dict):
             raise Problem("配置必须是对象", 422)

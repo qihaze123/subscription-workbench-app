@@ -106,7 +106,7 @@ function generateClashYaml(profile, sources, companySubnets, options = {}) {
     for (const p of proxyList) {
       lines.push(`  - name: "${p.name.replace(/"/g, '\\"')}"`);
       lines.push(`    type: ${p.type}`);
-      for (const key of ['server', 'port', 'hostname']) {
+      for (const key of ['server', 'port', 'hostname', 'username', 'password', 'dialer-proxy']) {
         if (p[key] != null) lines.push(`    ${key}: ${JSON.stringify(p[key])}`);
       }
     }

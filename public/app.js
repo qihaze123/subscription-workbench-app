@@ -61,7 +61,6 @@
       publicRules: document.getElementById('navPublicRulesCount'),
       sources: document.getElementById('navSourcesCount'),
       history: document.getElementById('navHistoryCount'),
-      company: document.getElementById('navCompanyCount')
     }
   };
 
@@ -260,7 +259,6 @@
     if (el.navCounts.publicRules) el.navCounts.publicRules.textContent = state.data.publicRuleCount ?? state.catalog?.length ?? 0;
     if (el.navCounts.sources) el.navCounts.sources.textContent = (state.data.sources || []).length;
     if (el.navCounts.history) el.navCounts.history.textContent = state.data.historyCounts[prof.id] || 0;
-    if (el.navCounts.company) el.navCounts.company.textContent = (state.data.company?.cidrs || []).length;
   }
 
   function showToast(msg, type = 'info') {
@@ -281,6 +279,11 @@
   // 核心功能：保存草稿、放弃、发布、回滚、校验 (绝不掩盖错误)
   // ========================================================
 
+  function draftUpdates(profile) {
+    const { groups, rules, network, hosts, sourceIds, name } = profile;
+    return { groups, rules, network, hosts, sourceIds, name };
+  }
+
   async function saveDraft() {
     const prof = getCurrentProfile();
     if (!prof || !getEditState(prof).dirty || state.profileWrites.has(prof.id)) return;
@@ -294,14 +297,7 @@
         body: JSON.stringify({
           profileId: prof.id,
           revision: prof.revision,
-          updates: {
-            groups: prof.groups,
-            rules: prof.rules,
-            network: prof.network,
-            hosts: prof.hosts,
-            sourceIds: prof.sourceIds,
-            name: prof.name
-          }
+          updates: draftUpdates(prof)
         })
       });
 
@@ -466,9 +462,6 @@
         break;
       case 'history':
         renderHistoryView();
-        break;
-      case 'company':
-        renderCompanyView();
         break;
       case 'network':
         renderNetworkView();
@@ -1596,7 +1589,7 @@
       </div>`}
       <div class="group-tabs group-setup-tabs" role="group" aria-label="候选类型">
         <button type="button" class="group-tab" data-setup-tab="sources" aria-pressed="true">订阅来源</button>
-        <button type="button" class="group-tab" data-setup-tab="groups" aria-pressed="false">其他策略组</button>
+        <button type="button" class="group-tab" data-setup-tab="groups" aria-pressed="false">固定节点与策略组</button>
       </div>
       <div class="group-setup-scroll">
         <div id="groupSetupSources"></div>
@@ -1633,7 +1626,7 @@
       }));
     }
     if (!selectedSources.length) sourcePanel.innerHTML = '<p class="empty-message">暂无订阅来源。</p>';
-    for (const [title, names] of [['可引用的策略组', linked.map(group => group.name)], ['内置目标', builtins]]) {
+    for (const [title, names] of [['可引用的策略组', linked.map(group => group.name)], ['固定节点与内置目标', builtins]]) {
       const section = document.createElement('section');
       section.className = 'group-setup-references';
       section.innerHTML = `<h3>${title}</h3>${names.map(name => `
@@ -4189,47 +4182,6 @@
   }
 
   // ========================================================
-  // 视图 6：公司共享网段
-  // ========================================================
-
-  function renderCompanyView() {
-    el.mainStage.innerHTML = '';
-    const comp = state.data.company || {};
-    const cidrs = comp.cidrs || [];
-    const container = document.createElement('div');
-    container.className = 'panel';
-
-    container.innerHTML = `
-      <div class="panel-header">
-        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-          <span class="panel-title">公司共享网段 (${cidrs.length} 个活跃 CIDR)</span>
-          <span class="badge ${comp.connected ? 'badge-clean' : 'badge-draft'}">
-            ${comp.connected ? '● 已连接同步服务' : '离线快照'}
-          </span>
-          <span class="badge badge-version tabular-nums">修订号 r${comp.revision || 2}</span>
-        </div>
-        <span style="font-size: 12px; color: var(--text-dim);">检查时间: ${new Date(comp.checkedAt || Date.now()).toLocaleString()}</span>
-      </div>
-      <div class="panel-body">
-        <div class="policy-explain-box" style="margin-bottom: 16px;">
-          公司网段作为跨设备共享策略统一维护。所有包含 <code>type: COMPANY</code> 的配置（电脑、手机）都会自动注入以下 CIDR 并走 <code>🏢 公司内网</code> 策略出口。
-        </div>
-
-        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px;">
-          ${cidrs.map(c => `
-            <div style="background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 13px; color: #fff; display: flex; align-items: center; justify-content: space-between;">
-              <span>${escapeHtml(c)}</span>
-              <span style="font-size: 11px; color: #d8b4fe;">CIDR</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-
-    el.mainStage.appendChild(container);
-  }
-
-  // ========================================================
   // 视图 7：DNS 与 TUN
   // ========================================================
 
@@ -4327,9 +4279,108 @@
   // 视图 8：设备配置管理
   // ========================================================
 
+  async function saveCustomNode(profile, nodeChange) {
+    if (state.profileWrites.has(profile.id)) throw new Error('该配置正在保存，请稍后重试');
+    const requestedKey = profileContentKey(profile);
+    state.profileWrites.add(profile.id);
+    updateTopbarBadges();
+    try {
+      const response = await fetch('/api/profile/save-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profileId: profile.id, revision: profile.revision, updates: draftUpdates(profile), nodeChange })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || '无法保存自定义节点');
+      if (requestedKey === profileContentKey(profile)) replaceProfile(result.profile);
+      else {
+        profile.nodes = result.profile.nodes;
+        acceptSavedProfile(profile, result.profile);
+      }
+      if (getCurrentProfile()?.id === profile.id && state.currentView === 'profiles') renderProfilesManageView();
+    } finally {
+      state.profileWrites.delete(profile.id);
+      updateTopbarBadges();
+    }
+  }
+
+  function openCustomNodeForm(profile, node) {
+    const dialers = [...new Set([...(profile.nodes || []), ...(profile.groups || [])].map(item => item.name))]
+      .filter(name => name !== node?.name);
+    const dialog = document.createElement('dialog');
+    dialog.className = 'dialog-box custom-node-dialog';
+    dialog.setAttribute('aria-labelledby', 'customNodeTitle');
+    dialog.innerHTML = `
+      <form>
+        <div class="dialog-header"><h2 class="panel-title" id="customNodeTitle">${node ? '编辑自定义节点' : '添加自定义节点'}</h2></div>
+        <div class="dialog-body custom-node-fields">
+          <label>节点名称<input class="input-text" name="nodeName" required maxlength="128" ${node ? 'readonly' : 'autofocus'}
+            value="${escapeHtml(node?.name || '')}"></label>
+          <label>代理协议<select class="input-text" name="protocol">
+            <option value="http">HTTP</option><option value="socks5" ${node?.type === 'socks5' ? 'selected' : ''}>SOCKS5</option>
+          </select></label>
+          <label>主机名或 IP<input class="input-text" name="server" required maxlength="253"
+            value="${escapeHtml(node?.server || '')}" placeholder="proxy.example.invalid"></label>
+          <label>端口<input class="input-text" type="number" name="port" min="1" max="65535" required value="${escapeHtml(String(node?.port ?? ''))}"></label>
+          <label>用户名（可选）<input class="input-text" name="username" autocomplete="off"
+            value="${escapeHtml(node?.username || '')}"></label>
+          <label>密码（可选）<input class="input-text" name="password" type="password" autocomplete="new-password"
+            ${node?.hasPassword ? 'placeholder="留空保留原密码"' : ''}></label>
+          <label class="custom-node-dialer">前置代理（可选）<select class="input-text" name="dialerProxy">
+            <option value="">直接连代理地址</option>
+            ${dialers.map(name => `<option value="${escapeHtml(name)}" ${name === node?.dialerProxy ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}
+          </select></label>
+          ${node?.hasPassword ? '<label class="custom-node-clear"><input type="checkbox" name="clearPassword"> 清除原密码</label>' : ''}
+          <p class="group-setup-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-footer">
+          <button type="button" class="btn btn-default close-modal">取消</button>
+          <button type="submit" class="btn btn-primary">保存到草稿</button>
+        </div>
+      </form>`;
+    const form = dialog.querySelector('form');
+    const submit = form.querySelector('[type=submit]');
+    const error = form.querySelector('[role=alert]');
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const data = new FormData(form);
+      submit.disabled = true;
+      error.hidden = true;
+      try {
+        await saveCustomNode(profile, {
+          action: node ? 'edit' : 'add',
+          name: data.get('nodeName').trim(),
+          type: data.get('protocol'),
+          server: data.get('server').trim().replace(/^\[([^\]]+)\]$/, '$1'),
+          port: Number(data.get('port')),
+          username: data.get('username'),
+          password: data.get('password'),
+          dialerProxy: data.get('dialerProxy'),
+          clearPassword: data.has('clearPassword')
+        });
+        dialog.close();
+        showToast('自定义节点已保存到草稿', 'success');
+      } catch (err) {
+        error.textContent = err.message;
+        error.hidden = false;
+      } finally {
+        submit.disabled = false;
+      }
+    };
+    dialog.querySelector('.close-modal').onclick = () => dialog.close();
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      document.getElementById('addCustomNodeBtn')?.focus();
+    });
+    el.modalContainer.appendChild(dialog);
+    dialog.showModal();
+  }
+
   function renderProfilesManageView() {
     el.mainStage.innerHTML = '';
     const profiles = state.data.profiles || [];
+    const current = getCurrentProfile();
+    const customNodes = (current?.nodes || []).filter(node => node.custom);
     const container = document.createElement('div');
     container.style.display = 'flex';
     container.style.flexDirection = 'column';
@@ -4364,8 +4415,44 @@
           </div>
         </div>
       </div>
+      ${current ? `
+        <section class="panel">
+          <div class="panel-header">
+            <span class="panel-title">自定义节点 · ${escapeHtml(current.name)}</span>
+            <button id="addCustomNodeBtn" class="btn btn-primary btn-sm">+ 添加节点</button>
+          </div>
+          <div class="panel-body">
+            ${customNodes.length ? customNodes.map((node, index) => `
+              <div class="custom-node-row">
+                <div><strong>${escapeHtml(node.name)}</strong>
+                  <div class="group-setup-choice-hint">${escapeHtml(node.type.toUpperCase())} · ${escapeHtml(node.server)} · ${node.port}</div>
+                </div>
+                <button type="button" class="btn btn-default btn-sm" data-node-edit="${index}">编辑</button>
+                <button type="button" class="btn btn-default btn-sm" data-node-remove="${index}">移除</button>
+              </div>`).join('') : '<p class="group-setup-choice-hint">可添加已有的 HTTP 或 SOCKS5 代理，再到策略组配置候选节点。</p>'}
+          </div>
+        </section>` : ''}
     `;
 
+    container.querySelector('#addCustomNodeBtn')?.addEventListener('click', () => openCustomNodeForm(current));
+    container.querySelectorAll('[data-node-edit]').forEach(button => {
+      button.onclick = () => openCustomNodeForm(current, customNodes[Number(button.dataset.nodeEdit)]);
+    });
+    container.querySelectorAll('[data-node-remove]').forEach(button => {
+      button.onclick = async () => {
+        const node = customNodes[Number(button.dataset.nodeRemove)];
+        if (!confirm(`从草稿移除「${node.name}」？`)) return;
+        button.disabled = true;
+        try {
+          await saveCustomNode(current, { action: 'remove', name: node.name });
+          showToast('自定义节点已从草稿移除', 'success');
+        } catch (error) {
+          showToast(error.message, 'error');
+        } finally {
+          button.disabled = false;
+        }
+      };
+    });
     const compareProfiles = container.querySelector('#compareProfilesBtn');
     if (compareProfiles) compareProfiles.onclick = () => openProfileComparison(compareProfiles);
     container.querySelectorAll('.btn-switch-p').forEach(btn => {

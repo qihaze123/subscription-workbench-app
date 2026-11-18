@@ -309,6 +309,36 @@ async function runE2ETests() {
     assert.strictEqual(pubRes.json.version, 3, '新发布版本号应为历史最大 2 + 1 = 3');
   });
 
+  await testCase('自定义节点可加入策略组，发布订阅时带上代理配置', async () => {
+    const profileId = blankProfile.id;
+    const name = '示例独立代理';
+    const password = 'demo-test-only-password';
+    const savePath = { path: '/api/profile/save-draft', method: 'POST' };
+    const group = { id: 'custom-exit', name: '指定出口', type: 'select', members: [name], selectors: [], options: {} };
+    const rules = [{ type: 'DOMAIN-SUFFIX', value: 'test.example', target: group.name, enabled: true },
+      { type: 'MATCH', value: '', target: 'DIRECT', enabled: true }];
+    const added = await request(savePath, {
+      profileId,
+      updates: { groups: [group], rules },
+      nodeChange: { action: 'add', name, type: 'socks5', server: '192.0.2.20', port: 1080, username: 'example', password }
+    });
+    assert.strictEqual(added.statusCode, 200);
+    assert.strictEqual(added.json.profile.nodes.find(node => node.name === name).hasPassword, true);
+    assert.ok(!added.body.includes(password));
+    assert.ok(!(await request({ path: '/api/data?view=bootstrap' })).body.includes(password));
+    assert.strictEqual((await request({ path: `/sub/${profileId}.yaml` })).statusCode, 404);
+    const published = await request({ path: '/api/profile/publish', method: 'POST' }, {
+      profileId, currentProfile: added.json.profile
+    });
+    assert.strictEqual(published.statusCode, 200);
+    const downloaded = await request({ path: `/sub/${profileId}.yaml` });
+    assert.ok(downloaded.body.includes(`password: "${password}"`));
+    assert.ok(downloaded.body.includes(`DOMAIN-SUFFIX,test.example,${group.name}`));
+    assert.ok(downloaded.body.includes(`- "${name}"`));
+    const removed = await request(savePath, { profileId, updates: {}, nodeChange: { action: 'remove', name } });
+    assert.strictEqual(removed.statusCode, 400);
+  });
+
   // 7. 订阅刷新真实性测试 (重点验证第三项修复)
   await testCase('POST /api/source/refresh：脱敏快照源拒绝伪造刷新，如实返回离线快照说明', async () => {
     const snapshot = await request({ path: '/api/data' });
