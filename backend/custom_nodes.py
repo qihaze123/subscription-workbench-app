@@ -24,6 +24,8 @@ def migrate_profiles(profiles, retarget):
             if name not in managed:
                 continue
             definition = {key: value for key, value in node.items() if key != 'dialer-proxy'}
+            if node.get('type') == 'tailscale':
+                definition['profileId'] = profile['id']
             if name in catalog and catalog[name] != definition:
                 index = 2
                 while f'{name} ({index})' in occupied:
@@ -182,10 +184,9 @@ def apply_node_change(profile, change):
     if previous and (previous['type'] == 'tailscale') != (proxy_type == 'tailscale'):
         raise Problem('请新建节点以切换到或切换出 Tailscale 类型', 422)
     if proxy_type == 'tailscale':
-        updated = {'name': name, 'type': 'tailscale', 'hostname': change['hostname'],
-                   'profileId': change['profileId'],
-                   'state-dir': previous['state-dir'] if previous else f'./tailscale-workbench-{uuid4().hex}',
-                   'udp': True}
+        connection = previous if previous else {'state-dir': f'./tailscale-workbench-{uuid4().hex}', 'udp': True}
+        updated = {**connection, 'name': name, 'type': 'tailscale', 'hostname': change['hostname'],
+                   'profileId': change['profileId']}
     else:
         updated = update_proxy(previous, change, name, nodes, profile['groups'])
     profile['nodes'] = [updated if node is previous else node for node in nodes] if previous else [*nodes, updated]
