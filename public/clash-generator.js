@@ -174,7 +174,12 @@ function generateClashYaml(profile, sources, companySubnets, options = {}) {
     }
 
     if (group.type === 'url-test' || group.type === 'fallback') {
-      lines.push('    url: "https://www.gstatic.com/generate_204"');
+      const probeUrl = (group.options?.url ?? group.extra?.url) || 'https://www.gstatic.com/generate_204';
+      lines.push(`    url: ${JSON.stringify(probeUrl)}`);
+      const expected = group.options?.['expected-status'] ?? group.extra?.['expected-status'];
+      if (expected != null || probeUrl !== 'https://www.gstatic.com/generate_204') {
+        lines.push(`    expected-status: ${JSON.stringify(String(expected ?? '200-399'))}`);
+      }
       lines.push('    interval: 300');
       if (group.type === 'url-test') {
         lines.push('    tolerance: 50');

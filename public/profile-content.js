@@ -4,7 +4,7 @@
     if (!profile) return null;
     const { id, updatedAt, publishedAt, publishedVersion, hasDraft, hasPendingSourceChanges, hasPendingConfiguration, revision, ...content } = profile;
     content.groups = (content.groups || []).map(group => {
-      const { extra, toleranceHint, ...fields } = group;
+      const { extra, toleranceHint, probeUrlHint, ...fields } = group;
       const { excluded, ...options } = group.options || {};
       if (excluded?.length) options.excluded = excluded;
       return extra && Object.keys(extra).length ? { ...fields, options, extra } : { ...fields, options };

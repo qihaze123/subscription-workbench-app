@@ -499,6 +499,34 @@ body {
 .group-fields select { width: 10rem; }
 .group-tolerance { display: flex; align-items: center; gap: 6px; color: var(--text-muted); white-space: nowrap; }
 .group-fields .group-tolerance input { width: 5.75rem; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.group-probe-actions { display: inline-flex; flex: 0 0 auto; }
+.group-probe-actions[hidden] { display: none; }
+.group-probe-actions :focus-visible { z-index: 1; }
+.group-probe-actions #probeGroupBtn { border-start-end-radius: 0; border-end-end-radius: 0; }
+#probeGroupBtn + #groupProbeSettings {
+  width: 32px;
+  padding-inline: 0;
+  margin-inline-start: -1px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+}
+.probe-settings-chevron {
+  width: 6px;
+  height: 6px;
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.dialog-box.group-probe-dialog { max-width: 420px; }
+.group-probe-dialog .dialog-body { display: grid; gap: 8px; min-width: 0; }
+.group-probe-address {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+}
+.group-probe-address input { width: 100%; min-width: 0; }
+.group-probe-hint { color: var(--text-muted); font-size: 12px; }
+.group-probe-reset { margin-inline-end: auto; }
 .group-view-switch { gap: 2px; padding: 2px; border-radius: var(--radius-md); background: var(--bg-app); }
 .mobile-group-select, .mobile-view-select { display: none; }
 
@@ -1542,6 +1570,8 @@ body:has(> .profile-compare-page) > :is(.topbar, .app-container) { display: none
   .node-more, .group-node-probe, .group-node-popover .btn { min-height: 36px; }
   .group-node-probe { min-width: 44px; }
   .group-candidate-actions .btn, .source-actions .btn { min-height: 40px; }
+  #probeGroupBtn + #groupProbeSettings { width: 44px; }
+  .group-probe-dialog .input-text { font-size: 16px; }
   .input-text.source-sort, .node-picker :is(.btn, .input-text) { min-height: 40px; }
   .group-setup-dialog .input-text { font-size: 16px; }
   .rule-picker-toggle { width: 44px; height: 44px; }

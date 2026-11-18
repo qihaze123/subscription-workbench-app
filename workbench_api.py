@@ -12,6 +12,7 @@ from backend.compiler import compile_profile as compile_clash, parse_yaml
 from backend.custom_nodes import change_catalog, migrate_profiles, public_node, select_nodes
 from backend.distribution import public_metadata
 from backend.local_data import hydrate
+from backend.probe_target import DEFAULT_PROBE_URL, group_probe_url
 from backend.rule_templates import catalog, load_template
 from backend.seed import now
 from backend.store import Problem, clean_profile, js
@@ -97,6 +98,8 @@ def public_profile(profile):
     result['nodes'] = [public_node(node, managed) for node in result.get('nodes', [])]
     for group in result.get('groups', []):
         previous = (group.get('extra') or {}).get('tolerance')
+        if 'url' not in (group.get('options') or {}) and (group.get('extra') or {}).get('url'):
+            group['probeUrlHint'] = group['extra']['url']
         if type(previous) is int and 'tolerance' not in group.get('options', {}):
             group['toleranceHint'] = previous
         group.pop('extra', None)
@@ -266,7 +269,8 @@ class WorkbenchAPI:
             data = {'liveData': True, 'profiles': profiles, 'company': self.store._get('company'),
                     **self.custom_nodes_data(),
                     'sources': [public_source(source, measurements.get(source['id'])) for source in self.store._get('sources')],
-                    'nodeProbeAvailable': self.probe.available, 'draftReviewAvailable': True,
+                    'nodeProbeAvailable': self.probe.available, 'groupProbeAvailable': self.probe.available,
+                    'defaultProbeUrl': DEFAULT_PROBE_URL, 'draftReviewAvailable': True,
                     'distribution': public_metadata(self.distribution, self.store, prefer_tailnet=bool(tailnet_admin))}
             if compact:
                 counts = {row['profile_id']: row['count'] for row in self.store.db.execute(
@@ -283,12 +287,17 @@ class WorkbenchAPI:
             raise Problem('缺少配置内容', 422)
         result = {**current, **{key: updates[key] for key in ('name', 'groups', 'rules', 'network', 'sourceIds') if key in updates}}
         extras = {group.get('id'): group.get('extra', {}) for group in current.get('groups', [])}
-        result['groups'] = [{**{key: value for key, value in group.items() if key not in {'toleranceHint', 'extra'}},
+        result['groups'] = [{**{key: value for key, value in group.items() if key not in {'toleranceHint', 'probeUrlHint', 'extra'}},
                              'extra': extras.get(group.get('id'), {})} for group in result.get('groups', [])]
         for group in result['groups']:
             options = group.get('options') or {}
             if 'tolerance' in options and (type(options['tolerance']) is not int or not 0 <= options['tolerance'] <= 65535):
                 raise Problem('节点切换容差必须是 0 到 65535 的整数，单位 ms。', 422)
+            if 'url' in options:
+                try:
+                    group_probe_url(group)
+                except ValueError as error:
+                    raise Problem(f'{group["name"]}：{error}', 422) from None
         if 'hosts' in updates:
             result['extras'] = {**result.get('extras', {}), 'hosts': updates['hosts']}
         for rule in result.get('rules', []):
@@ -448,6 +457,24 @@ class WorkbenchAPI:
             return {'source': public_source(source), 'message': message}
 
     def handle(self, handler, method, path, query, data, tailnet_admin):
+        if method == 'POST' and path == '/api/group-probe':
+            with self.store.lock:
+                row = self.store._row(data.get('profileId'))
+                self.store._check_revision(row, data.get('revision'))
+                draft = json.loads(row['body'])
+                published = json.loads(self.store._version(row['id'], row['published'])['body']) if row['published'] else None
+                target = self.merge_draft(draft, data.get('updates'), published)
+                group = next((group for group in target['groups'] if group.get('id') == data.get('groupId')), None)
+                if group is None:
+                    raise Problem('策略组不存在', 404)
+                result, document = compile_profile(target, self.store._get('sources'), self.store._get('company'))
+                if not result['ok']:
+                    raise Problem(result['errors'][0]['message'], 422)
+            try:
+                url = group_probe_url(group)
+            except ValueError as error:
+                raise Problem(str(error), 422) from None
+            return handler.json(self.probe.measure_group(document, group['name'], url, data.get('nodeNames'))) or True
         if method == 'POST' and path == '/api/custom-nodes':
             return handler.json(self.mutate_custom_nodes(data)) or True
         if method == 'GET' and path == '/api/data':

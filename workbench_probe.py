@@ -1,6 +1,7 @@
 """Run optional Linux node checks in short-lived, loopback-only Mihomo instances."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import copy
 import ipaddress
 import json
@@ -12,14 +13,16 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
+from threading import BoundedSemaphore
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 from uuid import uuid4
 
 from backend.compiler import dump_yaml, selected_nodes
 from backend.local_data import hydrate
+from backend.probe_target import DEFAULT_PROBE_URL
 from backend.seed import now
 from backend.store import Problem
 
@@ -27,6 +30,7 @@ from backend.store import Problem
 NOTICE = re.compile(r'剩余流量|套餐到期|到期时间|过期时间|下次重置|流量重置|官网')
 DIRECT = build_opener(ProxyHandler({}))
 WORKERS = 6
+GROUP_PROBE_TIMEOUT_MS = 9000
 
 
 def local_port():
@@ -35,12 +39,12 @@ def local_port():
         return sock.getsockname()[1]
 
 
-def fetch(url, token, body=None):
+def fetch(url, token, body=None, response_limit=4096, timeout=8):
     request = Request(url, data=json.dumps(body).encode() if body else None,
                       headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
                       method='PUT' if body else 'GET')
-    with DIRECT.open(request, timeout=8) as response:
-        payload = response.read(4096)
+    with DIRECT.open(request, timeout=timeout) as response:
+        payload = response.read(response_limit)
     return json.loads(payload) if payload else {}
 
 
@@ -54,6 +58,7 @@ class WorkbenchProbe:
         self.active = 0
         self.last_batch_start = {}
         self.batch_sequence = 0
+        self.group_slot = BoundedSemaphore(1)
 
     @property
     def available(self):
@@ -190,34 +195,112 @@ class WorkbenchProbe:
                       'proxies': [{**node, 'name': name}],
                       'proxy-groups': [{'name': group, 'type': 'select', 'proxies': [name]}],
                       'rules': ['MATCH,' + group]}
-            config_path = Path(directory) / 'config.yaml'
-            config_path.write_text(dump_yaml(config))
-            process = subprocess.Popen([self.binary, '-d', directory, '-f', str(config_path)],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                for _ in range(30):
-                    try:
-                        fetch(api + '/version', token)
-                        break
-                    except (URLError, OSError):
-                        if process.poll() is not None:
-                            raise RuntimeError('内核启动失败')
-                        time.sleep(.12)
-                else:
-                    raise RuntimeError('内核启动超时')
+            with self.running_core(config, directory, api, token):
                 return self.check_node(api, selector, mixed, token, name)
-            finally:
-                process.terminate()
+
+    @contextmanager
+    def running_core(self, config, directory, api, token):
+        config_path = Path(directory) / 'config.yaml'
+        config_path.write_text(dump_yaml(config))
+        config_path.chmod(0o600)
+        process = subprocess.Popen([self.binary, '-d', directory, '-f', str(config_path)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(30):
                 try:
-                    process.wait(3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                    fetch(api + '/version', token)
+                    break
+                except (URLError, OSError):
+                    if process.poll() is not None:
+                        raise RuntimeError('测速内核启动失败')
+                    time.sleep(.12)
+            else:
+                raise RuntimeError('测速内核启动超时')
+            yield
+        finally:
+            process.terminate()
+            try:
+                process.wait(3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+    def measure_group(self, document, group_name, url, node_names=None):
+        if not self.available:
+            raise Problem('测速内核未启用', 503)
+        nodes = {item['name']: item for item in document['proxies']}
+        groups = {item['name']: item for item in document['proxy-groups']}
+        root = groups[group_name]
+        names = root.get('proxies', [])
+        if node_names is not None:
+            if (not isinstance(node_names, list) or not node_names
+                    or any(not isinstance(name, str) or name not in names for name in node_names)
+                    or len(set(node_names)) != len(node_names)):
+                raise Problem('请选择本组当前可用的候选节点', 422)
+            names = node_names
+        if not names:
+            raise Problem('本组没有可测速的候选节点', 422)
+        if not self.group_slot.acquire(blocking=False):
+            raise Problem('另一个策略组正在测速，请稍后重试', 409)
+        try:
+            return self._measure_group(nodes, groups, root, names, url)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise Problem('测速内核未能完成组内测试', 502) from exc
+        finally:
+            self.group_slot.release()
+
+    def _measure_group(self, nodes, groups, root, names, url):
+        dependencies = {}
+        pending = list(names)
+        while pending:
+            name = pending.pop()
+            if name in dependencies:
+                continue
+            if name in nodes:
+                dependencies[name] = nodes[name]
+                if dialer := nodes[name].get('dialer-proxy'):
+                    pending.append(dialer)
+            elif name in groups:
+                group = groups[name]
+                members = group.get('proxies', [])
+                if not members:
+                    raise Problem(f'策略组「{name}」没有可独立测速的候选节点', 422)
+                dependencies[name] = dict(group)
+                dependencies[name].pop('use', None)
+                pending.extend(members)
+
+        token = secrets.token_hex(20)
+        control = local_port()
+        api = f'http://127.0.0.1:{control}'
+        probe_group = '__workbench_probe_' + token[:8]
+        config = {'external-controller': f'127.0.0.1:{control}', 'secret': token,
+                  'allow-lan': False, 'log-level': 'error', 'mode': 'rule', 'ipv6': True,
+                  'proxies': [node for name, node in dependencies.items() if name in nodes],
+                  'proxy-groups': [group for name, group in dependencies.items() if name in groups] +
+                                  [{'name': probe_group, 'type': 'select', 'proxies': names}],
+                  'rules': ['MATCH,' + probe_group]}
+        params = {'url': url, 'timeout': GROUP_PROBE_TIMEOUT_MS,
+                  'expected': str(root.get('expected-status', '204' if url == DEFAULT_PROBE_URL else '200-399'))}
+        with tempfile.TemporaryDirectory(prefix='group-probe-') as directory:
+            with self.running_core(hydrate(config), directory, api, token):
+                path = '/group/' + quote(probe_group, safe='') + '/delay?' + urlencode(params)
+                try:
+                    delays = fetch(api + path, token, response_limit=262144, timeout=GROUP_PROBE_TIMEOUT_MS / 1000 + 2)
+                except HTTPError as error:
+                    if error.code != 504:
+                        raise
+                    # Mihomo returns 504 when none of the requested nodes respond.
+                    delays = {}
+        checked_at = now()
+        return {'url': url, 'results': {name: {
+            'status': 'ok' if type(delays.get(name)) is int and delays[name] > 0 else 'failed',
+            'delayMs': delays.get(name), 'checkedAt': checked_at,
+        } for name in names}}
 
     @staticmethod
     def check_node(api, selector, mixed, token, name):
         result = {'status': 'failed', 'exitStatus': 'failed', 'checkedAt': now()}
-        query = urlencode({'url': 'https://www.gstatic.com/generate_204', 'timeout': 6000})
+        query = urlencode({'url': DEFAULT_PROBE_URL, 'timeout': 6000})
         try:
             delay = fetch(f'{api}/proxies/{quote(name, safe="")}/delay?{query}', token).get('delay')
             if isinstance(delay, int):

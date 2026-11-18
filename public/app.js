@@ -26,6 +26,8 @@
     expandedSources: new Set(),
     sourceSort: 'latency',
     probeJobs: [],
+    groupProbeRuns: new Map(),
+    groupProbeResults: new Map(),
     probeTasks: new Map(),
     probeStarting: new Map(),
     ruleSearchQuery: '',
@@ -550,12 +552,20 @@
       const { candidates, natural, excludedNodes, sourcesByNode } = computeGroupCandidates(currentGroup, prof);
       const showRules = state.groupTab === 'rules';
       const ruleCount = (prof.rules || []).filter(rule => rule.target === currentGroup.name).length;
-      const sourceKey = node => sourcesByNode.get(node.name)?.id || '';
       const hasSubscription = [...candidates, ...excludedNodes].some(node => sourcesByNode.has(node.name));
       const priorityKey = `${prof.id}:${currentGroup.id}`;
       const editablePriority = candidates.length > 1 && currentGroup.type !== 'url-test';
-      const canProbe = state.data.nodeProbeAvailable;
-      const testable = candidates.filter(node => canProbe && sourcesByNode.has(node.name));
+      const canProbe = state.data.groupProbeAvailable && candidates.length;
+      const targetInput = () => currentGroup.options?.url ?? currentGroup.probeUrlHint ?? '';
+      const defaultUrl = state.data.defaultProbeUrl || 'https://www.gstatic.com/generate_204';
+      const activeUrl = () => targetInput() || defaultUrl;
+      const probeKey = () => JSON.stringify([prof.id, currentGroup.id, activeUrl(), prof.revision,
+        candidates.map(node => [node.name, sourcesByNode.get(node.name)?.updatedAt])]);
+      const measurementForGroup = node => {
+        const current = state.groupProbeResults.get(probeKey())?.get(node.name);
+        if (!current) return activeUrl() === defaultUrl ? node.measurement : null;
+        return { ...node.measurement, ...current };
+      };
 
       detailCol.innerHTML = `
         <div class="group-detail-header">
@@ -600,12 +610,16 @@
                   <option value="config">配置顺序</option>
                   <option value="latency">延迟优先</option>
                 </select>` : ''}
-                ${testable.length ? `<button type="button" id="probeGroupBtn" class="btn btn-default btn-sm probe-all" title="测试当前组的候选代理" aria-label="测速当前组">${speedIcon}<span>测速</span></button>` : ''}
+                <div class="group-probe-actions" role="group" aria-label="组内测速">
+                  ${canProbe ? `<button type="button" id="probeGroupBtn" class="btn btn-default btn-sm probe-all" aria-label="测速当前组">${speedIcon}<span>测速</span></button>` : ''}
+                  <button type="button" id="groupProbeSettings" class="btn btn-default btn-sm" aria-haspopup="dialog" aria-label="测速设置" title="测速设置">
+                    ${canProbe ? '<span class="probe-settings-chevron" aria-hidden="true"></span>' : '测速设置'}
+                  </button>
+                </div>
                 ${editablePriority ? '<button type="button" id="editGroupPriority" class="btn btn-subtle btn-sm">编辑优先级</button><span id="groupPrioritySelection" role="status" hidden></span><button type="button" id="moveSelectedPriority" class="btn btn-default btn-sm" hidden>移动所选</button><button type="button" id="cancelGroupPriority" class="btn btn-default btn-sm" hidden>取消</button><button type="button" id="applyGroupPriority" class="btn btn-primary btn-sm" hidden>应用到草稿</button>' : ''}
                 ${candidates.length ? nodeBulkActions('exclude') : ''}
                 <button type="button" id="addManualMemberBtn" class="btn btn-default btn-sm">配置候选</button>
               </div>
-              <div class="probe-progress group-probe-progress" hidden><span class="probe-progress-text tabular-nums"></span><progress aria-label="组内测速进度"></progress></div>
             </div>
 
             ${editablePriority ? '<p id="groupPriorityHint" class="group-priority-hint" hidden><span class="priority-mouse-hint">Shift 连选 · ⌘/Ctrl 增减 · 拖动已选卡片调整顺序</span><span class="priority-touch-hint">轻点多选 · 长按已选卡片拖动</span></p>' : ''}
@@ -648,13 +662,6 @@
         const applyButton = detailCol.querySelector('#applyGroupPriority');
         const cancelButton = detailCol.querySelector('#cancelGroupPriority');
         const excludedBox = detailCol.querySelector('#excludedContainer');
-        const namesBySource = new Map();
-        for (const node of candidates) {
-          const key = sourceKey(node);
-          if (!key) continue;
-          if (!namesBySource.has(key)) namesBySource.set(key, []);
-          namesBySource.get(key).push(node.name);
-        }
         let bulkMode = null;
         const bulkSelection = new Set();
         let stagedOrder = null;
@@ -675,7 +682,8 @@
           findGroupNode(name)?.querySelector('.node-more')?.focus({ preventScroll: true });
         };
         candidates.forEach((node, index) => {
-          const card = createNodeElement(node, currentGroup, index, candidates.length, false, sourcesByNode.get(node.name), move, prof);
+          const card = createNodeElement(node, currentGroup, index, candidates.length, false, sourcesByNode.get(node.name), move, prof,
+            canProbe ? () => testGroup(node.name) : null);
           cards.push(card);
           candidateCards.set(node.name, card);
         });
@@ -704,7 +712,7 @@
         }
         function arrangeCandidates() {
           const ordered = stagedOrder ? stagedOrder.map(name => candidatesByName.get(name))
-            : state.groupSort === 'latency' ? orderByLatency(candidates) : candidates;
+            : state.groupSort === 'latency' ? orderByLatency(candidates.map(node => ({ ...node, measurement: measurementForGroup(node) }))) : candidates;
           const grouped = !stagedOrder && hasSubscription && state.groupDisplay === 'source';
           const signature = JSON.stringify([Boolean(stagedOrder), grouped, ...ordered.map(node => node.name)]);
           if (signature === arranged) return;
@@ -915,7 +923,7 @@
             cancelButton.hidden = !edit;
             applyButton.hidden = true;
             for (const control of [sort, display, detailCol.querySelector('#addManualMemberBtn'),
-              detailCol.querySelector('#probeGroupBtn'), detailCol.querySelector('.group-view-switch')]) {
+              detailCol.querySelector('.group-probe-actions'), detailCol.querySelector('.group-view-switch')]) {
               if (control) control.hidden = edit;
             }
             arrangeCandidates();
@@ -1005,42 +1013,55 @@
           };
         }
         const groupProbe = detailCol.querySelector('#probeGroupBtn');
-        const progress = detailCol.querySelector('.group-probe-progress');
-        if (groupProbe) groupProbe.onclick = () => {
-          const selection = new Map();
-          for (const node of testable) {
-            const source = sourcesByNode.get(node.name);
-            if (!selection.has(source.id)) selection.set(source.id, { sourceId: source.id, sourceUpdatedAt: source.updatedAt, nodes: [] });
-            selection.get(source.id).nodes.push(node.name);
+        const settingsButton = detailCol.querySelector('#groupProbeSettings');
+        settingsButton.onclick = () => openGroupProbeSettings(settingsButton, targetInput(), defaultUrl, next => {
+          currentGroup.options ||= {};
+          const saved = state.savedProfiles.get(prof.id)?.groups?.find(group => group.id === currentGroup.id);
+          const savedOptions = saved?.options || {};
+          if (next === (savedOptions.url ?? saved?.probeUrlHint ?? '') && !Object.hasOwn(savedOptions, 'url')) {
+            delete currentGroup.options.url;
+          } else {
+            currentGroup.options.url = next;
           }
-          runProbe({ selection: [...selection.values()] });
-        };
+          updateTopbarBadges();
+          refreshVisibleProbe();
+        });
+        async function testGroup(nodeName) {
+          const key = probeKey();
+          if (state.groupProbeRuns.size) return;
+          const names = nodeName ? [nodeName] : candidates.map(node => node.name);
+          state.groupProbeRuns.set(key, new Set(names));
+          refreshVisibleProbe();
+          try {
+            const response = await fetch('/api/group-probe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ profileId: prof.id, revision: prof.revision, groupId: currentGroup.id,
+                nodeNames: names, updates: draftUpdates(prof) }),
+              signal: AbortSignal.timeout(18000)
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || '测速失败');
+            const previous = state.groupProbeResults.get(key) || new Map();
+            state.groupProbeResults.set(key, new Map([...previous, ...Object.entries(result.results)]));
+            const results = Object.values(result.results);
+            showToast(`测速完成 · ${results.filter(item => item.status === 'ok').length}/${results.length} 可用`, 'success');
+          } catch (error) {
+            showToast(error.message || '测速失败', 'error');
+          } finally {
+            state.groupProbeRuns.delete(key);
+            refreshVisibleProbe();
+          }
+        }
+        if (groupProbe) groupProbe.onclick = () => testGroup();
         refreshGroupProbeView = () => {
-          const active = currentProbeJobs();
-          const batchJob = active.find(job => job.scope.selection?.some(target => {
-            const names = namesBySource.get(target.sourceId);
-            return names && target.nodes.some(name => names.includes(name));
-          })) || active.find(job => !job.scope.nodeName && cards.some(card =>
-            card.source && job.targets?.[card.source.id]?.nodes.includes(card.node.name)));
-          let total = 0, done = 0, activeCards = false;
+          const pending = state.groupProbeRuns.get(probeKey());
           for (const card of cards) {
-            const task = probeNodeStatus(card.source, card.node.name, active);
-            activeCards ||= Boolean(task);
-            const target = card.source && batchJob?.targets?.[card.source.id];
-            if (!card.excluded && target?.sourceUpdatedAt === card.source?.updatedAt && target?.nodes.includes(card.node.name)) {
-              total++;
-              if (Object.hasOwn(batchJob.results?.[card.source.id] || {}, card.node.name)) done++;
-            }
-            card.update(task, probeNodeBusy(card.source, card.node.name, task, active));
+            const testing = pending?.has(card.node.name);
+            card.update(testing ? 'running' : null, Boolean(state.groupProbeRuns.size), measurementForGroup(card.node));
           }
-          const groupRequested = active.some(job => job.scope.selection?.length === namesBySource.size &&
-            job.scope.selection.every(target => {
-              const names = namesBySource.get(target.sourceId);
-              return names?.length === target.nodes.length && target.nodes.every(name => names.includes(name));
-            }));
-          if (groupProbe) updateProbeButton(groupProbe, groupRequested, groupRequested ? '测速中' : '测速');
-          updateProbeProgress(progress, Boolean(batchJob) && total > 0, done, total);
-          if (!activeCards) arrangeCandidates();
+          if (groupProbe) updateProbeButton(groupProbe, Boolean(state.groupProbeRuns.size), pending ? '测速中' : '测速');
+          if (!pending) arrangeCandidates();
         };
       }
 
@@ -1127,6 +1148,73 @@
     el.mainStage.appendChild(container);
     refreshGroupProbeView?.();
     if (state.data.nodeProbeAvailable) scheduleProbePoll(0);
+  }
+
+  function openGroupProbeSettings(trigger, current, defaultUrl, apply) {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'dialog-box node-picker group-probe-dialog';
+    dialog.setAttribute('aria-labelledby', 'groupProbeSettingsTitle');
+    dialog.innerHTML = `
+      <form>
+        <div class="dialog-header">
+          <h2 class="panel-title" id="groupProbeSettingsTitle">测速设置</h2>
+        </div>
+        <div class="dialog-body">
+          <label class="group-probe-address">
+            测速地址
+            <input id="groupProbeUrl" class="input-text" type="url" inputmode="url" maxlength="2048" autofocus
+              value="${escapeHtml(current)}" placeholder="${escapeHtml(defaultUrl)}" aria-describedby="groupProbeAddressHint">
+          </label>
+          <p id="groupProbeAddressHint" class="group-probe-hint">留空使用默认地址。</p>
+        </div>
+        <div class="dialog-footer">
+          <button type="button" class="btn btn-subtle group-probe-reset">恢复默认</button>
+          <button type="button" class="btn btn-default close-modal">取消</button>
+          <button type="submit" class="btn btn-primary">应用到草稿</button>
+        </div>
+      </form>`;
+    const form = dialog.querySelector('form');
+    const input = dialog.querySelector('#groupProbeUrl');
+    const reset = dialog.querySelector('.group-probe-reset');
+    reset.disabled = !input.value;
+    input.oninput = () => {
+      input.setCustomValidity('');
+      reset.disabled = !input.value;
+    };
+    reset.onclick = () => {
+      input.value = '';
+      input.oninput();
+      input.focus();
+    };
+    dialog.querySelector('.close-modal').onclick = () => dialog.close();
+    form.onsubmit = event => {
+      event.preventDefault();
+      const next = input.value.trim();
+      if (next) {
+        let valid = false;
+        try {
+          const url = new URL(next);
+          valid = /^https?:\/\//i.test(next) && !url.username && !url.password && !url.hash &&
+            url.port !== '0' && !/\s/.test(next);
+        } catch { /* Invalid URL. The form stays open. */ }
+        if (!valid) {
+          input.setCustomValidity('请输入完整的 HTTP 或 HTTPS 网址，且不包含认证信息或片段');
+          input.reportValidity();
+          return;
+        }
+      }
+      if (next !== current) {
+        apply(next);
+        showToast(next ? '测速地址已应用到草稿' : '已恢复默认测速地址', 'success');
+      }
+      dialog.close();
+    };
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      if (trigger.isConnected) trigger.focus({ preventScroll: true });
+    });
+    el.modalContainer.appendChild(dialog);
+    dialog.showModal();
   }
 
   function nodeBulkActions(mode) {
@@ -1309,12 +1397,12 @@
     popover.querySelector('button')?.focus({ preventScroll: true });
   }
 
-  function createNodeElement(node, group, index, count, excluded, source, move, profile) {
+  function createNodeElement(node, group, index, count, excluded, source, move, profile, runCheck) {
     const item = document.createElement('div');
     const preferred = index === 0 && group.type !== 'url-test';
     const canMove = !excluded && count > 1 && group.type !== 'url-test';
     const linkedGroup = profile.groups.find(item => item.name === node.name);
-    const testable = Boolean(source && state.data.nodeProbeAvailable);
+    const testable = Boolean(runCheck);
     const name = escapeHtml(node.rawName ? node.rawName.replace(/^\[[^\]]+\]\s*/, '') : node.name);
     const fullName = escapeHtml(node.name);
     const metadata = [source && (source.prefix || source.name), node.type].filter(Boolean).join(' · ');
@@ -1334,7 +1422,7 @@
           ${metadata ? `<span class="group-node-origin" title="${escapeHtml(metadata)}">${escapeHtml(metadata)}</span>` : ''}
           <span class="group-node-rank" hidden></span>
         </div>
-        ${testable ? `<button type="button" class="btn group-node-probe" aria-label="测速 ${fullName}" title="点击重新测速"></button>` : ''}
+        ${testable ? `<button type="button" class="btn group-node-probe" aria-label="测速 ${fullName}" title="点击重新测速"></button>` : '<span class="group-node-measurement"></span>'}
       </div>
       ${canMove ? `<div class="node-priority-controls" hidden><span class="node-priority-number tabular-nums"></span><button type="button" class="btn btn-subtle btn-sm" data-node-move aria-expanded="false">移到…</button></div>` : ''}
       <div class="group-node-popover" popover="auto">
@@ -1349,6 +1437,7 @@
       </div>
     `;
     const probe = item.querySelector('.group-node-probe');
+    const badge = probe || item.querySelector('.group-node-measurement');
     const more = item.querySelector('.node-more');
     const popover = item.querySelector('.group-node-popover');
     const details = popover.querySelector('.group-node-probe-details');
@@ -1379,7 +1468,7 @@
       }
     }
     setPosition(index, false);
-    if (probe) probe.onclick = () => startProbe(source, node);
+    if (probe) probe.onclick = runCheck;
     more.onclick = () => {
       if (popover.matches(':popover-open')) {
         popover.hidePopover();
@@ -1410,15 +1499,14 @@
       findGroupNode(node.name)?.querySelector('.node-more')?.focus({ preventScroll: true });
       showToast(`${excluded ? '已恢复' : '已排除'} ${node.name}`, 'info');
     };
-    return { item, node, setPosition, source: testable ? source : null, excluded, update(pending, busy) {
-      if (probe) {
-        const result = pending ? probeStatusMarkup(pending)
-          : nodeMeasurementBadge(node).replace('尚未测量', '未测');
-        if (probe.innerHTML !== result) probe.innerHTML = result;
-        updateProbeButton(probe, busy);
-      }
-      const timestamp = node.measurement?.checkedAt;
-      const measured = nodeExitResult(node) + (timestamp ? `<time datetime="${escapeHtml(timestamp)}">测速于 ${escapeHtml(new Date(timestamp).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'}))}</time>` : '');
+    return { item, node, setPosition, source, excluded, update(pending, busy, measurement) {
+      const measuredNode = { ...node, measurement };
+      const result = pending ? probeStatusMarkup(pending)
+        : nodeMeasurementBadge(measuredNode).replace('尚未测量', '未测');
+      if (badge.innerHTML !== result) badge.innerHTML = result;
+      if (probe) updateProbeButton(probe, busy);
+      const timestamp = measurement?.checkedAt;
+      const measured = nodeExitResult(measuredNode) + (timestamp ? `<time datetime="${escapeHtml(timestamp)}">测速于 ${escapeHtml(new Date(timestamp).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'}))}</time>` : '');
       if (details.innerHTML !== measured) details.innerHTML = measured;
       details.hidden = !measured;
     } };

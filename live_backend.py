@@ -139,6 +139,7 @@ def import_store(export_path, target_path, fixture_path):
 
 
 def prepare_profile(profile, sources):
+    from backend.probe_target import DEFAULT_PROBE_URL
     profile = copy.deepcopy(profile)
     extras = profile.setdefault('extras', {})
     extras['hosts'] = profile.get('hosts', extras.get('hosts', {}))
@@ -164,7 +165,13 @@ def prepare_profile(profile, sources):
         kind = group.get('type')
         defaults = {}
         if kind in ('fallback', 'url-test'):
-            defaults = {'url': 'https://www.gstatic.com/generate_204', 'interval': 120 if kind == 'fallback' else 600}
+            if 'url' in options:
+                options['url'] = options['url'] or DEFAULT_PROBE_URL
+            if options.get('url', DEFAULT_PROBE_URL) != DEFAULT_PROBE_URL and 'expected-status' not in (group.get('extra') or {}):
+                options.setdefault('expected-status', '200-399')
+            defaults = {'url': DEFAULT_PROBE_URL, 'interval': 120 if kind == 'fallback' else 600}
+        else:
+            options.pop('url', None)
         if kind == 'url-test':
             defaults['tolerance'] = 50
         legacy = group.get('extra') or {}
