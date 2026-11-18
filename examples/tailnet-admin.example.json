@@ -1,0 +1,5 @@
+{
+  "login": "admin@example.invalid",
+  "additional_logins": [],
+  "httpsPort": 9443
+}

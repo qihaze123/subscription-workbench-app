@@ -1,0 +1,19 @@
+{
+  "name": "subscription-workbench",
+  "version": "1.1.0",
+  "description": "中文订阅工作台 - 网络策略与多订阅管理系统",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/invariants.test.js && node test/e2e-http.test.js"
+  },
+  "keywords": [
+    "clash",
+    "subscription",
+    "proxy",
+    "workbench"
+  ],
+  "author": "Antigravity",
+  "license": "ISC",
+  "private": true
+}

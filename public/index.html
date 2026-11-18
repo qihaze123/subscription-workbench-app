@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>订阅工作台 · 网络策略与多订阅管理系统</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand-title">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+        <span>订阅工作台</span>
+      </div>
+
+      <!-- 设备配置切换器 (带显式标签) -->
+      <div class="profile-selector">
+        <label for="profileSelect" class="profile-selector-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+          </svg>
+          <span>配置:</span>
+        </label>
+        <select id="profileSelect" title="切换当前操作的设备配置" aria-label="设备配置切换"></select>
+      </div>
+
+      <!-- 版本与草稿徽标 -->
+      <div class="profile-status-badges">
+        <span id="versionBadge" class="badge badge-version tabular-nums" title="当前已发布版本" hidden></span>
+        <span id="draftBadge" class="badge" role="status" hidden></span>
+      </div>
+    </div>
+
+    <div class="topbar-right" hidden>
+      <button id="discardDraftBtn" class="btn btn-subtle btn-sm" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+        <span>放弃草稿</span>
+      </button>
+
+      <button id="saveDraftBtn" class="btn btn-default" title="保存当前编辑到草稿 (Ctrl+S / ⌘S)" aria-label="保存草稿" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+        <span>保存草稿</span>
+      </button>
+
+      <button id="validateBtn" class="btn btn-default" title="检查当前配置的规则与策略组有效性" aria-label="校验配置" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+        <span>校验</span>
+      </button>
+
+      <button id="reviewChangesBtn" class="btn btn-default btn-sm" type="button" hidden>查看变更</button>
+
+      <button id="publishBtn" class="btn btn-primary" title="将当前编辑内容正式发布为新版本" aria-label="发布新版本" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        <span>发布新版</span>
+      </button>
+
+      <button id="subExportBtn" class="btn btn-success" title="获取订阅地址或下载 YAML" aria-label="获取订阅" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        <span>订阅地址</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 工作台主容器 -->
+  <div class="app-container">
+    <!-- 侧边导航 -->
+    <aside class="sidebar">
+      <select id="mobileViewSelect" class="input-text mobile-view-select" aria-label="切换工作台页面"></select>
+      <nav class="nav-menu" aria-label="主要功能导航">
+        <div class="nav-item active" data-view="groups" tabindex="0" role="button" aria-label="策略组管理">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+          <span>策略组管理</span>
+          <span id="navGroupsCount" class="nav-badge tabular-nums">10</span>
+        </div>
+
+        <div class="nav-item" data-view="rules" tabindex="0" role="button" aria-label="分流与匹配测试">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          <span>分流与匹配测试</span>
+          <span id="navRulesCount" class="nav-badge tabular-nums">92</span>
+        </div>
+
+        <div class="nav-item" data-view="public-rules" tabindex="0" role="button" aria-label="公共规则库">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+          <span>公共规则库</span>
+          <span id="navPublicRulesCount" class="nav-badge tabular-nums">2022</span>
+        </div>
+
+        <div class="nav-item" data-view="sources" tabindex="0" role="button" aria-label="订阅源与节点">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+          <span>订阅源维护</span>
+          <span id="navSourcesCount" class="nav-badge tabular-nums">4</span>
+        </div>
+
+        <div class="nav-item" data-view="history" tabindex="0" role="button" aria-label="版本历史与回滚">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 14 14"></polyline></svg>
+          <span>版本历史与回滚</span>
+          <span id="navHistoryCount" class="nav-badge tabular-nums">5</span>
+        </div>
+
+        <div class="nav-item" data-view="company" tabindex="0" role="button" aria-label="公司共享网段">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 21h18M3 7v14M21 7v14M6 11h2M6 15h2M10 11h2M10 15h2M14 11h2M14 15h2M18 11h2M18 15h2M9 3h6v4H9z"></path></svg>
+          <span>公司共享网段</span>
+          <span id="navCompanyCount" class="nav-badge tabular-nums">11</span>
+        </div>
+
+        <div class="nav-item" data-view="network" tabindex="0" role="button" aria-label="DNS 与 TUN">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          <span>DNS 与 TUN</span>
+        </div>
+
+        <div class="nav-item" data-view="profiles" tabindex="0" role="button" aria-label="设备配置管理">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+          <span>设备配置管理</span>
+        </div>
+      </nav>
+    </aside>
+
+    <!-- 主工作区 -->
+    <main class="main-stage" id="mainStage">
+      <!-- 视图由 app.js 动态渲染 -->
+    </main>
+  </div>
+
+  <!-- 提示容器 (Toast) -->
+  <div id="toastContainer"></div>
+
+  <!-- 弹窗容器 -->
+  <div id="modalContainer"></div>
+
+  <!-- 脚本引用 -->
+  <script src="rule-matcher.js"></script>
+  <script src="profile-content.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

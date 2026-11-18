@@ -1,0 +1,638 @@
+{
+  "profiles": [
+    {
+      "id": "desktop",
+      "name": "电脑示例",
+      "device": "desktop",
+      "description": "虚构示例配置",
+      "sourceIds": [
+        "demo-a",
+        "demo-b"
+      ],
+      "nodes": [
+        {
+          "name": "工作台 Tailscale",
+          "type": "tailscale",
+          "hostname": "workbench-demo"
+        },
+        {
+          "name": "示例内网代理",
+          "type": "http",
+          "server": "192.0.2.10",
+          "port": 8080
+        }
+      ],
+      "groups": [
+        {
+          "id": "daily",
+          "name": "日常流量",
+          "type": "select",
+          "selectors": [],
+          "members": [
+            "自动优选",
+            "DIRECT"
+          ],
+          "options": {},
+          "extra": {}
+        },
+        {
+          "id": "auto",
+          "name": "自动优选",
+          "type": "url-test",
+          "selectors": [
+            {
+              "sourceId": "demo-a",
+              "include": "",
+              "exclude": ""
+            },
+            {
+              "sourceId": "demo-b",
+              "include": "",
+              "exclude": ""
+            }
+          ],
+          "members": [],
+          "options": {
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": 300
+          },
+          "extra": {}
+        },
+        {
+          "id": "corp",
+          "name": "🏢 公司内网",
+          "type": "select",
+          "selectors": [],
+          "members": [
+            "示例内网代理"
+          ],
+          "options": {},
+          "extra": {}
+        }
+      ],
+      "rules": [
+        {
+          "id": "mesh",
+          "type": "DOMAIN",
+          "value": "device-01.mesh.example",
+          "target": "工作台 Tailscale",
+          "noResolve": false,
+          "enabled": true
+        },
+        {
+          "id": "corp",
+          "type": "COMPANY",
+          "value": "",
+          "target": "🏢 公司内网",
+          "noResolve": true,
+          "enabled": true
+        },
+        {
+          "id": "last",
+          "type": "MATCH",
+          "value": "",
+          "target": "日常流量",
+          "noResolve": false,
+          "enabled": true
+        }
+      ],
+      "network": {
+        "dns": {
+          "enable": false
+        },
+        "tun": {
+          "enable": false
+        }
+      },
+      "extras": {
+        "allow-lan": false,
+        "mode": "rule"
+      },
+      "publishedVersion": 1,
+      "publishedAt": "2026-01-01T00:00:00+00:00",
+      "updatedAt": "2026-01-01T00:00:00+00:00",
+      "hasDraft": false
+    },
+    {
+      "id": "phone",
+      "name": "手机示例",
+      "device": "phone",
+      "description": "虚构示例配置",
+      "sourceIds": [
+        "demo-a",
+        "demo-b"
+      ],
+      "nodes": [
+        {
+          "name": "工作台 Tailscale",
+          "type": "tailscale",
+          "hostname": "workbench-demo"
+        },
+        {
+          "name": "示例内网代理",
+          "type": "http",
+          "server": "192.0.2.10",
+          "port": 8080
+        }
+      ],
+      "groups": [
+        {
+          "id": "daily",
+          "name": "日常流量",
+          "type": "select",
+          "selectors": [],
+          "members": [
+            "自动优选",
+            "DIRECT"
+          ],
+          "options": {},
+          "extra": {}
+        },
+        {
+          "id": "auto",
+          "name": "自动优选",
+          "type": "url-test",
+          "selectors": [
+            {
+              "sourceId": "demo-a",
+              "include": "",
+              "exclude": ""
+            },
+            {
+              "sourceId": "demo-b",
+              "include": "",
+              "exclude": ""
+            }
+          ],
+          "members": [],
+          "options": {
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": 300
+          },
+          "extra": {}
+        },
+        {
+          "id": "corp",
+          "name": "🏢 公司内网",
+          "type": "select",
+          "selectors": [],
+          "members": [
+            "示例内网代理"
+          ],
+          "options": {},
+          "extra": {}
+        }
+      ],
+      "rules": [
+        {
+          "id": "mesh",
+          "type": "DOMAIN",
+          "value": "device-01.mesh.example",
+          "target": "工作台 Tailscale",
+          "noResolve": false,
+          "enabled": true
+        },
+        {
+          "id": "corp",
+          "type": "COMPANY",
+          "value": "",
+          "target": "🏢 公司内网",
+          "noResolve": true,
+          "enabled": true
+        },
+        {
+          "id": "last",
+          "type": "MATCH",
+          "value": "",
+          "target": "日常流量",
+          "noResolve": false,
+          "enabled": true
+        }
+      ],
+      "network": {
+        "dns": {
+          "enable": false
+        },
+        "tun": {
+          "enable": false
+        }
+      },
+      "extras": {
+        "allow-lan": false,
+        "mode": "rule"
+      },
+      "publishedVersion": 1,
+      "publishedAt": "2026-01-01T00:00:00+00:00",
+      "updatedAt": "2026-01-01T00:00:00+00:00",
+      "hasDraft": false
+    }
+  ],
+  "company": {
+    "cidrs": [
+      "192.0.2.0/24"
+    ],
+    "origin": "文档专用示例网段",
+    "updatedAt": "2026-01-01T00:00:00+00:00",
+    "connected": false
+  },
+  "sources": [
+    {
+      "id": "demo-a",
+      "name": "示例来源 A",
+      "prefix": "DEMO-A",
+      "url": "",
+      "enabled": true,
+      "status": "demo",
+      "updatedAt": "2026-01-01T00:00:00+00:00",
+      "error": "",
+      "cache": [
+        {
+          "name": "日本 01",
+          "type": "trojan",
+          "server": "demo-a-1.example.invalid",
+          "port": 443,
+          "password": "demo-not-a-real-credential",
+          "sni": "example.invalid"
+        },
+        {
+          "name": "新加坡 02",
+          "type": "trojan",
+          "server": "demo-a-2.example.invalid",
+          "port": 443,
+          "password": "demo-not-a-real-credential",
+          "sni": "example.invalid"
+        },
+        {
+          "name": "美国 家宽 03",
+          "type": "trojan",
+          "server": "demo-a-3.example.invalid",
+          "port": 443,
+          "password": "demo-not-a-real-credential",
+          "sni": "example.invalid"
+        }
+      ],
+      "nodes": [
+        {
+          "name": "[DEMO-A] 日本 01",
+          "rawName": "日本 01",
+          "type": "trojan"
+        },
+        {
+          "name": "[DEMO-A] 新加坡 02",
+          "rawName": "新加坡 02",
+          "type": "trojan"
+        },
+        {
+          "name": "[DEMO-A] 美国 家宽 03",
+          "rawName": "美国 家宽 03",
+          "type": "trojan"
+        }
+      ],
+      "subscriptionUrlStored": true
+    },
+    {
+      "id": "demo-b",
+      "name": "示例来源 B",
+      "prefix": "DEMO-B",
+      "url": "",
+      "enabled": true,
+      "status": "demo",
+      "updatedAt": "2026-01-01T00:00:00+00:00",
+      "error": "",
+      "cache": [
+        {
+          "name": "日本 轻量 01",
+          "type": "trojan",
+          "server": "demo-b-1.example.invalid",
+          "port": 443,
+          "password": "demo-not-a-real-credential",
+          "sni": "example.invalid"
+        },
+        {
+          "name": "美国 家宽 03",
+          "type": "trojan",
+          "server": "demo-b-2.example.invalid",
+          "port": 443,
+          "password": "demo-not-a-real-credential",
+          "sni": "example.invalid"
+        }
+      ],
+      "nodes": [
+        {
+          "name": "[DEMO-B] 日本 轻量 01",
+          "rawName": "日本 轻量 01",
+          "type": "trojan"
+        },
+        {
+          "name": "[DEMO-B] 美国 家宽 03",
+          "rawName": "美国 家宽 03",
+          "type": "trojan"
+        }
+      ],
+      "subscriptionUrlStored": true
+    }
+  ],
+  "history": {
+    "desktop": [
+      {
+        "version": 1,
+        "publishedAt": "2026-01-01T00:00:00+00:00",
+        "profile": {
+          "id": "desktop",
+          "name": "电脑示例",
+          "device": "desktop",
+          "description": "虚构示例配置",
+          "sourceIds": [
+            "demo-a",
+            "demo-b"
+          ],
+          "nodes": [
+            {
+              "name": "工作台 Tailscale",
+              "type": "tailscale",
+              "hostname": "workbench-demo"
+            },
+            {
+              "name": "示例内网代理",
+              "type": "http",
+              "server": "192.0.2.10",
+              "port": 8080
+            }
+          ],
+          "groups": [
+            {
+              "id": "daily",
+              "name": "日常流量",
+              "type": "select",
+              "selectors": [],
+              "members": [
+                "自动优选",
+                "DIRECT"
+              ],
+              "options": {},
+              "extra": {}
+            },
+            {
+              "id": "auto",
+              "name": "自动优选",
+              "type": "url-test",
+              "selectors": [
+                {
+                  "sourceId": "demo-a",
+                  "include": "",
+                  "exclude": ""
+                },
+                {
+                  "sourceId": "demo-b",
+                  "include": "",
+                  "exclude": ""
+                }
+              ],
+              "members": [],
+              "options": {
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": 300
+              },
+              "extra": {}
+            },
+            {
+              "id": "corp",
+              "name": "🏢 公司内网",
+              "type": "select",
+              "selectors": [],
+              "members": [
+                "示例内网代理"
+              ],
+              "options": {},
+              "extra": {}
+            }
+          ],
+          "rules": [
+            {
+              "id": "mesh",
+              "type": "DOMAIN",
+              "value": "device-01.mesh.example",
+              "target": "工作台 Tailscale",
+              "noResolve": false,
+              "enabled": true
+            },
+            {
+              "id": "corp",
+              "type": "COMPANY",
+              "value": "",
+              "target": "🏢 公司内网",
+              "noResolve": true,
+              "enabled": true
+            },
+            {
+              "id": "last",
+              "type": "MATCH",
+              "value": "",
+              "target": "日常流量",
+              "noResolve": false,
+              "enabled": true
+            }
+          ],
+          "network": {
+            "dns": {
+              "enable": false
+            },
+            "tun": {
+              "enable": false
+            }
+          },
+          "extras": {
+            "allow-lan": false,
+            "mode": "rule"
+          },
+          "publishedVersion": 1,
+          "publishedAt": "2026-01-01T00:00:00+00:00",
+          "updatedAt": "2026-01-01T00:00:00+00:00",
+          "hasDraft": false
+        },
+        "effectiveRules": [
+          "DOMAIN,device-01.mesh.example,工作台 Tailscale",
+          "IP-CIDR,192.0.2.0/24,🏢 公司内网,no-resolve",
+          "MATCH,日常流量"
+        ],
+        "nodeCount": 7
+      }
+    ],
+    "phone": [
+      {
+        "version": 1,
+        "publishedAt": "2026-01-01T00:00:00+00:00",
+        "profile": {
+          "id": "phone",
+          "name": "手机示例",
+          "device": "phone",
+          "description": "虚构示例配置",
+          "sourceIds": [
+            "demo-a",
+            "demo-b"
+          ],
+          "nodes": [
+            {
+              "name": "工作台 Tailscale",
+              "type": "tailscale",
+              "hostname": "workbench-demo"
+            },
+            {
+              "name": "示例内网代理",
+              "type": "http",
+              "server": "192.0.2.10",
+              "port": 8080
+            }
+          ],
+          "groups": [
+            {
+              "id": "daily",
+              "name": "日常流量",
+              "type": "select",
+              "selectors": [],
+              "members": [
+                "自动优选",
+                "DIRECT"
+              ],
+              "options": {},
+              "extra": {}
+            },
+            {
+              "id": "auto",
+              "name": "自动优选",
+              "type": "url-test",
+              "selectors": [
+                {
+                  "sourceId": "demo-a",
+                  "include": "",
+                  "exclude": ""
+                },
+                {
+                  "sourceId": "demo-b",
+                  "include": "",
+                  "exclude": ""
+                }
+              ],
+              "members": [],
+              "options": {
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": 300
+              },
+              "extra": {}
+            },
+            {
+              "id": "corp",
+              "name": "🏢 公司内网",
+              "type": "select",
+              "selectors": [],
+              "members": [
+                "示例内网代理"
+              ],
+              "options": {},
+              "extra": {}
+            }
+          ],
+          "rules": [
+            {
+              "id": "mesh",
+              "type": "DOMAIN",
+              "value": "device-01.mesh.example",
+              "target": "工作台 Tailscale",
+              "noResolve": false,
+              "enabled": true
+            },
+            {
+              "id": "corp",
+              "type": "COMPANY",
+              "value": "",
+              "target": "🏢 公司内网",
+              "noResolve": true,
+              "enabled": true
+            },
+            {
+              "id": "last",
+              "type": "MATCH",
+              "value": "",
+              "target": "日常流量",
+              "noResolve": false,
+              "enabled": true
+            }
+          ],
+          "network": {
+            "dns": {
+              "enable": false
+            },
+            "tun": {
+              "enable": false
+            }
+          },
+          "extras": {
+            "allow-lan": false,
+            "mode": "rule"
+          },
+          "publishedVersion": 1,
+          "publishedAt": "2026-01-01T00:00:00+00:00",
+          "updatedAt": "2026-01-01T00:00:00+00:00",
+          "hasDraft": false
+        },
+        "effectiveRules": [
+          "DOMAIN,device-01.mesh.example,工作台 Tailscale",
+          "IP-CIDR,192.0.2.0/24,🏢 公司内网,no-resolve",
+          "MATCH,日常流量"
+        ],
+        "nodeCount": 7
+      }
+    ]
+  },
+  "publicRuleLibrary": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "description": "ChatGPT、OpenAI API 和相关资源",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.yaml"
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "description": "Claude、Anthropic API 和相关资源",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/anthropic.yaml"
+    },
+    {
+      "id": "category-ai-!cn",
+      "name": "海外 AI 服务",
+      "description": "跨多个 AI 服务的社区规则集",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-%21cn.yaml"
+    },
+    {
+      "id": "youtube",
+      "name": "YouTube",
+      "description": "视频网站与相关资源",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/youtube.yaml"
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "代码托管与相关资源",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/github.yaml"
+    },
+    {
+      "id": "netflix",
+      "name": "Netflix",
+      "description": "视频流媒体与相关资源",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/netflix.yaml"
+    },
+    {
+      "id": "telegram",
+      "name": "Telegram",
+      "description": "消息服务及相关资源",
+      "source": "MetaCubeX / meta-rules-dat",
+      "sourceUrl": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/telegram.yaml"
+    }
+  ]
+}
