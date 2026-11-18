@@ -1457,6 +1457,22 @@ body:has(> .profile-compare-page) > :is(.topbar, .app-container) { display: none
   gap: 14px;
 }
 
+.subscription-share {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.subscription-share-toggle, .subscription-share-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.subscription-share-toggle input { accent-color: var(--primary); }
+.subscription-share p { font-size: 12px; color: var(--text-muted); }
+.subscription-share-link input { flex: 1; min-width: 0; }
+.subscription-share-link[hidden] { display: none; }
+
 .dialog-footer {
   padding: 12px 18px;
   border-top: 1px solid var(--border-subtle);

@@ -17,7 +17,7 @@ from . import ip_reputation
 
 from .compiler import compile_profile, dump_yaml, import_config, parse_yaml, selector_regex_matches, summarize_group_members
 from .store import Problem, Store
-from .distribution import DATA_DIR, load_config, public_metadata, start_server
+from .distribution import DATA_DIR, load_config, public_metadata, share_state, start_server
 from .rule_templates import catalog, load_template, refresh_catalog
 from workbench_api import WorkbenchAPI, gzip_for_ui
 
@@ -113,6 +113,14 @@ def handler_for(store, static_dir=None, distribution=None, tailnet_admin=None, n
                     return
                 if path == "/api/distribution" and method == "GET":
                     return self.json(public_metadata(distribution, store, prefer_tailnet=bool(tailnet_admin)))
+                if path == "/api/distribution/share":
+                    if method == "GET":
+                        return self.json(share_state(store, distribution, query.get("profileId", [""])[0]))
+                    if method == "POST":
+                        enabled = data.get("enabled")
+                        if type(enabled) is not bool:
+                            raise Problem("请提供有效的外发开关状态", 422)
+                        return self.json(share_state(store, distribution, data.get("profileId"), enabled))
                 if path == "/api/bootstrap" and method == "GET":
                     return self.json(store.bootstrap())
                 if parts == ["api", "rule-templates"] and method == "GET":
@@ -253,11 +261,16 @@ def main():
     parser.add_argument("--empty", action="store_true", help="初始化空数据库")
     args = parser.parse_args()
     distribution = load_config()
+    funnel = distribution.get("funnel") if distribution else None
+    if funnel and funnel["listenPort"] in {args.port, args.admin_port}:
+        parser.error("公网订阅与管理入口必须使用不同的监听端口")
     admin_path = Path(os.environ.get("WORKBENCH_ADMIN_CONFIG", DATA_DIR / "private/tailnet-admin.json")).expanduser()
     tailnet_admin = None
     if admin_path.is_file():
         admin = json.loads(admin_path.read_text())
         https_port = admin.get("httpsPort", 9443)
+        if funnel and funnel["httpsPort"] == https_port:
+            parser.error("公网订阅与管理入口必须使用不同的 HTTPS 端口")
         additional_logins = admin.get("additional_logins", [])
         if not isinstance(additional_logins, list):
             raise ValueError("Tailscale 管理入口配置无效")
@@ -273,8 +286,10 @@ def main():
         from .node_probe import NodeProbes
         node_probes = NodeProbes(store, probe_core)
     download_server=start_server(store,distribution) if distribution else None
-    if download_server:
-        threading.Thread(target=download_server.serve_forever,daemon=True).start()
+    funnel_server = start_server(store, distribution, public=True) if funnel else None
+    download_servers = [listener for listener in (download_server, funnel_server) if listener]
+    for listener in download_servers:
+        threading.Thread(target=listener.serve_forever, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(store, distribution=distribution, node_probes=node_probes))
     admin_server = None
     if tailnet_admin:
@@ -288,9 +303,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if download_server:
-            download_server.shutdown()
-            download_server.server_close()
+        for listener in download_servers:
+            listener.shutdown()
+            listener.server_close()
         if admin_server:
             admin_server.shutdown()
             admin_server.server_close()

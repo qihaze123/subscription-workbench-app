@@ -4760,7 +4760,18 @@
               下载当前已发布的 v${prof.publishedVersion}。
             </div>
           </div>
-
+          ${distribution?.funnelAvailable ? `
+          <section class="subscription-share">
+            <label class="subscription-share-toggle">
+              <input type="checkbox" role="switch" data-share-toggle disabled aria-describedby="subscriptionShareHint">
+              <strong>允许外发</strong>
+            </label>
+            <p id="subscriptionShareHint" role="status">正在读取外发状态…</p>
+            <div class="subscription-share-link" data-share-link hidden>
+              <input type="text" class="input-text" readonly aria-label="公网订阅地址">
+              <button type="button" class="btn btn-default" data-copy-share>复制公网链接</button>
+            </div>
+          </section>` : ''}
         </div>
         <div class="dialog-footer">
           <button class="btn btn-default close-modal">关闭</button>
@@ -4771,8 +4782,7 @@
 
     modal.querySelectorAll('.close-modal').forEach(b => b.onclick = () => modal.remove());
 
-    modal.querySelector('#copySubUrlBtn').onclick = async () => {
-      const input = modal.querySelector('#subUrlInput');
+    async function copySubscriptionUrl(input) {
       try {
         await navigator.clipboard.writeText(input.value);
         showToast('订阅地址已复制', 'success');
@@ -4780,9 +4790,58 @@
         input.select();
         showToast('请手动复制已选中的地址', 'info');
       }
-    };
+    }
+    modal.querySelector('#copySubUrlBtn').onclick = () => copySubscriptionUrl(modal.querySelector('#subUrlInput'));
 
     el.modalContainer.appendChild(modal);
+    if (!distribution?.funnelAvailable) return;
+
+    const toggle = modal.querySelector('[data-share-toggle]');
+    const hint = modal.querySelector('#subscriptionShareHint');
+    const link = modal.querySelector('[data-share-link]');
+    const publicInput = link.querySelector('input');
+    link.querySelector('button').onclick = () => copySubscriptionUrl(publicInput);
+    let current;
+
+    function showShare(share) {
+      current = share;
+      toggle.disabled = !share.allowed;
+      toggle.checked = share.enabled;
+      publicInput.value = share.url || '';
+      link.hidden = !share.enabled;
+      hint.textContent = share.allowed
+        ? '拿到公网链接的人可以下载当前已发布的配置。关闭后，旧链接立即失效。'
+        : '这份现用设备订阅仅通过 Tailnet 发放。';
+    }
+
+    async function fetchShare(options) {
+      const path = '/api/distribution/share';
+      const url = options ? path : `${path}?profileId=${encodeURIComponent(prof.id)}`;
+      const response = await fetch(url, { cache: 'no-store', ...options });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || '暂时无法读取外发状态');
+      return body;
+    }
+
+    toggle.onchange = async () => {
+      const enabled = toggle.checked;
+      toggle.disabled = true;
+      try {
+        showShare(await fetchShare({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profileId: prof.id, enabled })
+        }));
+      } catch (error) {
+        showShare(current);
+        showToast(error.message, 'error');
+      }
+    };
+    try {
+      showShare(await fetchShare());
+    } catch (error) {
+      hint.textContent = `${error.message}，请重新打开订阅地址弹窗。`;
+    }
   }
 
   function escapeHtml(str) {

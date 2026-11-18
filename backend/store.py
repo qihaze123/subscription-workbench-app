@@ -60,6 +60,12 @@ class Store:
             body TEXT NOT NULL, yaml TEXT NOT NULL, stats TEXT NOT NULL,
             sources TEXT NOT NULL, company TEXT NOT NULL,
             PRIMARY KEY(profile_id, version));
+          CREATE TABLE IF NOT EXISTS subscription_shares (
+            profile_id TEXT PRIMARY KEY, nonce TEXT NOT NULL);
+          CREATE TRIGGER IF NOT EXISTS remove_subscription_share AFTER DELETE ON profiles
+          BEGIN
+            DELETE FROM subscription_shares WHERE profile_id = OLD.id;
+          END;
         """)
         self.local_mode = self.db.execute("SELECT 1 FROM meta WHERE key='realBaselines'").fetchone() is not None
         if self.db.execute("SELECT 1 FROM meta WHERE key='sources'").fetchone() is None:

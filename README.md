@@ -90,6 +90,18 @@ python3 -m venv .venv
 
 只给设备刷新订阅时，配置只读入口即可。需要远程管理时，将 [管理账号示例](examples/tailnet-admin.example.json) 复制到 `data/private/tailnet-admin.json`，填写允许登录的 Tailscale 账号，再配置管理转发。工作台会检查 Tailscale Serve 提供的登录标识。
 
+### 用 Funnel 外发选中的订阅
+
+在现有的 `data/private/distribution.json` 中增加 `"funnel": {"httpsPort": 10000, "listenPort": 18864}`，保留现有端口和密钥。启动工作台后，将公网 HTTPS `10000` 转发到专用的回环监听 `127.0.0.1:18864`。
+
+```bash
+tailscale funnel --bg --https=10000 http://127.0.0.1:18864
+```
+
+在要分享的配置里打开「订阅地址」，启用「允许外发」，再复制公网链接。所有配置默认关闭，现用的 `phone` 和 `desktop` 固定为 Tailnet 私有订阅。关闭开关即可撤销公网链接，再次开启会生成新的链接。已下载配置中的代理凭据仍按服务商设定的有效期使用。
+
+原有的订阅和管理端口继续用 Tailscale Serve。公网监听只处理单独授权的 `/share/` 下载路径。
+
 ## 数据、配置与开发
 
 - **配置项。** 将 [`.env.example`](.env.example) 复制为 `.env`，按需填写，然后在启动前执行 `set -a; . ./.env; set +a` 导入。设置 `WORKBENCH_MIHOMO` 指定可用的 Mihomo 内核，即可运行工作台的节点测速。

@@ -10,10 +10,13 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .store import Problem
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get('WORKBENCH_DATA_DIR', ROOT / 'data')).expanduser()
 CONFIG = Path(os.environ.get('WORKBENCH_DISTRIBUTION_CONFIG', DATA_DIR / 'private/distribution.json')).expanduser()
 PROFILE_ID = re.compile(r'[A-Za-z0-9_-]{1,80}\Z')
+PROTECTED_PROFILES = frozenset({'desktop', 'phone'})
 
 
 def load_config(path=CONFIG):
@@ -33,6 +36,14 @@ def load_config(path=CONFIG):
     for key in ['httpsPort', 'listenPort']:
         if not isinstance(config.get(key), int) or not 1024 <= config[key] <= 65535:
             raise ValueError('发布端口无效')
+    if 'funnel' in config:
+        funnel = config['funnel']
+        if (not isinstance(funnel, dict) or type(funnel.get('httpsPort')) is not int
+                or funnel['httpsPort'] not in (443, 8443, 10000)
+                or funnel['httpsPort'] == config['httpsPort']
+                or type(funnel.get('listenPort')) is not int or not 1024 <= funnel['listenPort'] <= 65535
+                or funnel['listenPort'] == config['listenPort']):
+            raise ValueError('公网分享必须使用独立的 Funnel 端口与本机监听端口')
     return config
 
 
@@ -71,6 +82,49 @@ def url_for(config, profile_id):
     return f"https://{config['hostname']}:{config['httpsPort']}/s/{profile_id}/{token_for(config, profile_id)}.yaml"
 
 
+def share_token(config, profile_id, nonce):
+    message = f'public-subscription\x00{profile_id}\x00{nonce}'.encode()
+    return hmac.new(bytes.fromhex(config['secret']), message, hashlib.sha256).hexdigest()
+
+
+def share_origin(config):
+    port = config['funnel']['httpsPort']
+    return f"https://{config['hostname']}" + (f':{port}' if port != 443 else '')
+
+
+def share_nonce(store, profile_id):
+    row = store.db.execute('SELECT nonce FROM subscription_shares WHERE profile_id=?', (profile_id,)).fetchone()
+    return row['nonce'] if row else None
+
+
+def share_state(store, config, profile_id, enabled=None):
+    if not config or not config.get('funnel'):
+        raise Problem('未配置公网订阅入口', 404)
+    if not isinstance(profile_id, str) or not PROFILE_ID.fullmatch(profile_id):
+        raise Problem('无效的配置 ID', 422)
+    with store.lock, store.db:
+        profile = store._row(profile_id)
+        if profile_id in PROTECTED_PROFILES:
+            if enabled is not None:
+                raise Problem('现用手机和电脑订阅仅限 Tailnet', 403)
+            return {'allowed': False, 'enabled': False}
+        if not profile['published']:
+            if enabled is True:
+                raise Problem('请先发布订阅，再允许外发', 409)
+            return {'allowed': False, 'enabled': False}
+        nonce = share_nonce(store, profile_id)
+        if enabled is True and nonce is None:
+            nonce = secrets.token_hex(32)
+            store.db.execute('INSERT INTO subscription_shares VALUES (?, ?)', (profile_id, nonce))
+        elif enabled is False:
+            store.db.execute('DELETE FROM subscription_shares WHERE profile_id=?', (profile_id,))
+            nonce = None
+        result = {'allowed': True, 'enabled': nonce is not None}
+        if nonce:
+            result['url'] = f'{share_origin(config)}/share/{profile_id}/{share_token(config, profile_id, nonce)}.yaml'
+        return result
+
+
 def public_metadata(config, store, prefer_tailnet=False):
     if not config:
         return {'enabled': False, 'links': {}, 'scope': 'local'}
@@ -86,10 +140,13 @@ def public_metadata(config, store, prefer_tailnet=False):
     if config.get('isolated'):
         return {'enabled': True, 'scope': 'local', 'readOnly': True, 'links': local, 'localLinks': local}
     return {'enabled': True, 'scope': 'tailnet', 'readOnly': True,
-            'links': {pid: url_for(config, pid) for pid in ids}, 'localLinks': local}
+            'links': {pid: url_for(config, pid) for pid in ids}, 'localLinks': local,
+            'funnelAvailable': bool(config.get('funnel'))}
 
 
-def handler_for(store, config):
+def handler_for(store, config, public=False):
+    namespace = 'share' if public else 's'
+    allowed_origin = share_origin(config) if public else f"https://{config['hostname']}:{config['httpsPort']}"
     class DownloadHandler(BaseHTTPRequestHandler):
         server_version = 'SubscriptionDownload/1'
 
@@ -114,15 +171,24 @@ def handler_for(store, config):
                 if host not in {'127.0.0.1', 'localhost', config['hostname']}:
                     return self.reply(404, head=head)
                 origin = self.headers.get('Origin')
-                if origin and origin != f"https://{config['hostname']}:{config['httpsPort']}":
+                if origin and origin != allowed_origin:
                     return self.reply(403, head=head)
                 parts = urllib.parse.urlsplit(self.path).path.split('/')
-                if len(parts) != 4 or parts[:2] != ['', 's'] or not PROFILE_ID.fullmatch(parts[2]) or not parts[3].endswith('.yaml'):
+                if len(parts) != 4 or parts[:2] != ['', namespace] or not PROFILE_ID.fullmatch(parts[2]) or not parts[3].endswith('.yaml'):
                     return self.reply(404, head=head)
                 pid, token = parts[2], parts[3][:-5]
-                if not re.fullmatch(r'[a-f0-9]{64}', token) or not hmac.compare_digest(token, token_for(config, pid)):
+                if not re.fullmatch(r'[a-f0-9]{64}', token):
                     return self.reply(404, head=head)
-                body = store.subscription(pid).encode('utf-8')
+                with store.lock:
+                    if public:
+                        nonce = share_nonce(store, pid) if pid not in PROTECTED_PROFILES else None
+                        expected = share_token(config, pid, nonce) if nonce else None
+                    else:
+                        expected = token_for(config, pid)
+                    body = (store.subscription(pid).encode('utf-8')
+                            if expected is not None and hmac.compare_digest(token, expected) else None)
+                if body is None:
+                    return self.reply(404, head=head)
                 return self.reply(200, body, 'application/yaml; charset=utf-8', head)
             except (BrokenPipeError, ConnectionResetError):
                 return
@@ -145,8 +211,9 @@ def handler_for(store, config):
     return DownloadHandler
 
 
-def start_server(store, config):
-    server = ThreadingHTTPServer(('127.0.0.1', config['listenPort']), handler_for(store, config))
+def start_server(store, config, public=False):
+    listener = config['funnel'] if public else config
+    server = ThreadingHTTPServer(('127.0.0.1', listener['listenPort']), handler_for(store, config, public))
     server.daemon_threads = True
     return server
 
