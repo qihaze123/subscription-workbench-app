@@ -15,6 +15,7 @@
     publishedSnapshots: new Map(),
     publishedRequests: new Map(),
     profileWrites: new Set(),
+    compareUndos: new Map(),
     currentProfileId: 'desktop',
     currentView: 'groups',
     selectedGroupId: null,
@@ -3978,10 +3979,12 @@
     let showUpstream = false;
     let request;
     let restoring = false;
+    const canApply = !review && state.data.compareDraftAvailable;
+    let applying = canApply;
 
     function side(label) {
       return `<fieldset class="compare-side"><legend>${label}</legend>
-        ${review ? '<strong class="compare-fixed-version"></strong>' : ''}
+        ${review || canApply ? '<strong class="compare-fixed-version" hidden></strong>' : ''}
         ${profile ? '' : `<label>配置<select class="input-text compare-profile">
           ${profiles.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}
         </select></label>`}
@@ -4005,6 +4008,11 @@
           </div>
           ${profile ? `<p class="compare-profile-name">${escapeHtml(profile.name)}</p>` : ''}
           <div class="compare-controls">${side(review ? '当前发布' : '基准')}${side(review ? '待发布' : '对比')}</div>
+          ${canApply ? `<div class="compare-transfer-bar">
+            <p class="compare-transfer-note"></p>
+            <button type="button" class="btn btn-default btn-sm" data-undo-compare hidden>撤销上一步</button>
+            <button type="button" class="btn btn-subtle btn-sm" data-compare-mode>仅对比</button>
+          </div>` : ''}
           <div class="compare-tabs">
             <nav class="compare-categories" aria-label="配置差异类别" hidden></nav>
             <div class="compare-extra-actions">
@@ -4041,6 +4049,8 @@
     const categories = page.querySelector('.compare-categories');
     const upstreamButton = page.querySelector('.compare-upstream');
     const restoreAll = page.querySelector('.compare-restore-all');
+    const undo = page.querySelector('[data-undo-compare]');
+    const mode = page.querySelector('[data-compare-mode]');
     const layouts = [...page.querySelectorAll('[data-layout]')];
     const editedProfile = () => state.data.profiles.find(item => item.id === current.id);
     const reviewInput = () => {
@@ -4048,6 +4058,36 @@
       return { profileId: editing.id, revision: editing.revision,
         publishedVersion: editing.publishedVersion, currentProfile: editing };
     };
+    const transferInput = () => ({
+      ...reviewInput(), sourceId: profileId(sides[0]), sourceVersion: sides[0].version.value
+    });
+    const labels = () => applying ? ['来源版本', '当前草稿'] : ['基准', '对比'];
+
+    function updateUndo() {
+      if (!undo) return;
+      const entry = state.compareUndos.get(current.id);
+      undo.hidden = !applying || entry?.revision !== editedProfile().revision;
+      undo.disabled = restoring || getEditState(editedProfile()).dirty;
+    }
+
+    function updateComparisonSides() {
+      if (!canApply) return;
+      page.classList.toggle('compare-transfer', applying);
+      sides.forEach((side, index) => {
+        const fixed = applying && index === 1;
+        side.fieldset.querySelector('legend').textContent = labels()[index];
+        if (side.profile) side.profile.closest('label').hidden = fixed;
+        side.version.closest('label').hidden = fixed;
+        side.fixed.hidden = !fixed;
+        if (fixed) side.fixed.textContent = current.name;
+      });
+      const note = page.querySelector('.compare-transfer-note');
+      note.textContent = applying ? getEditState(editedProfile()).dirty
+        ? '应用差异时会一起保存当前编辑。'
+        : '逐项应用到草稿，发布后才会生效。' : '';
+      mode.textContent = applying ? '仅对比' : '应用到当前草稿';
+      updateUndo();
+    }
 
     function updateLayout() {
       page.dataset.mode = narrow.matches ? 'inline' : layout;
@@ -4075,19 +4115,26 @@
         `v${version}${version === active.publishedVersion ? ' · 当前发布' : ''}`]);
       if (review) {
         choices.push(['draft', '待发布配置']);
-      } else if (state.savedProfiles.get(id)?.hasDraft || !active.publishedVersion) {
-        choices.push(['draft', '已保存草稿']);
-      } else if (state.savedProfiles.get(id)?.hasPendingSourceChanges) {
-        choices.push(['draft', '待发布配置']);
+      } else if (!applying || id !== current.id) {
+        if (state.savedProfiles.get(id)?.hasDraft || !active.publishedVersion) choices.push(['draft', '已保存草稿']);
+        else if (state.savedProfiles.get(id)?.hasPendingSourceChanges) choices.push(['draft', '待发布配置']);
       }
+      if (applying && side === sides[1]) choices.splice(0, choices.length, ['draft', '当前草稿']);
       side.version.replaceChildren(...choices.map(([value, title]) => new Option(title, value)));
       if (choices.some(([value]) => value === String(selected))) side.version.value = String(selected);
-      if (side.fixed) side.fixed.textContent = side.version.selectedOptions[0]?.textContent?.replace(' · 当前发布', '') || '';
+      if (review && side.fixed) {
+        side.fixed.hidden = false;
+        side.fixed.textContent = side.version.selectedOptions[0]?.textContent?.replace(' · 当前发布', '') || '';
+      }
     }
 
     function restoreButton(item) {
-      return review && item.restore ? `<button type="button" class="btn btn-subtle btn-sm compare-restore-one"
-        data-restore="${escapeHtml(item.restore)}" aria-label="${escapeHtml(item.restoreLabel + ' · ' + item.name)}">${escapeHtml(item.restoreLabel)}</button>` : '';
+      if ((!review && !applying) || !item.restore) return '';
+      const action = applying ? { added: '从草稿删除', removed: '新增到草稿',
+        changed: item.nodeName ? '替换此节点' : item.details ? '替换整组' : '替换此项',
+        moved: '采用此顺序' }[item.kind] : item.restoreLabel;
+      return `<button type="button" class="btn btn-subtle btn-sm compare-restore-one"
+        data-restore="${escapeHtml(item.restore)}" aria-label="${escapeHtml(action + ' · ' + item.name)}">${escapeHtml(action)}</button>`;
     }
 
     function difference(item) {
@@ -4104,6 +4151,8 @@
         </li>`;
       }
       const names = { added: '新增', removed: '移除', changed: '变更', moved: '调序' };
+      const kind = applying ? ({ added: 'removed', removed: 'added' }[item.kind] || item.kind) : item.kind;
+      const [leftLabel, rightLabel] = labels();
       function cell(key, label, mark) {
         const position = item[`${key}Position`];
         const value = item[key];
@@ -4116,10 +4165,10 @@
         </div>`;
       }
       const moved = item.kind === 'moved';
-      return `<li class="compare-item" data-change="${item.kind}">
+      return `<li class="compare-item" data-change="${kind}">
         <div class="compare-item-title"><span>${escapeHtml(item.name)}</span><span class="compare-item-actions">
-          <span class="compare-kind">${names[item.kind]}${item.alsoMoved ? '并调序' : ''}</span>${restoreButton(item)}</span></div>
-        <div class="compare-values">${cell('before', '基准', moved ? '' : '−')}${cell('after', '对比', moved ? '' : '+')}</div>
+          <span class="compare-kind">${names[kind]}${item.alsoMoved ? '并调序' : ''}</span>${restoreButton(item)}</span></div>
+        <div class="compare-values">${cell('before', leftLabel, moved ? '' : applying ? '+' : '−')}${cell('after', rightLabel, moved ? '' : applying ? '−' : '+')}</div>
       </li>`;
     }
 
@@ -4141,7 +4190,7 @@
           ${section.title === '策略组' && data.complete.includes(false) ? '<span>按保存的策略设置对比</span>' : ''}
         </div>
         <div class="compare-column-labels" aria-hidden="true">
-          ${sides.map((side, index) => `<span>${index === 0 ? '基准' : '对比'} · ${escapeHtml(side.version.selectedOptions[0].textContent)}</span>`).join('')}
+          ${sides.map((side, index) => `<span>${labels()[index]} · ${escapeHtml(applying && index === 1 ? current.name : side.version.selectedOptions[0]?.textContent || '')}</span>`).join('')}
         </div>
         <ul class="compare-items compare-diff">${section.items.map(difference).join('')}</ul>
       </section>` : '';
@@ -4164,7 +4213,12 @@
       if (restoreAll) restoreAll.hidden = true;
       showUpstream = false;
       for (const side of sides) side.limit.hidden = true;
-      if (!review && profileId(a) === profileId(b) && a.version.value === b.version.value) {
+      if (applying && !a.version.value) {
+        output.setAttribute('aria-busy', 'false');
+        status.textContent = '请选择一个已发布的历史版本，或切换到另一份订阅。';
+        return;
+      }
+      if (!review && !applying && profileId(a) === profileId(b) && a.version.value === b.version.value) {
         output.setAttribute('aria-busy', 'false');
         status.textContent = '两侧选择了同一个版本。';
         return;
@@ -4172,7 +4226,8 @@
       status.textContent = '正在对比…';
       output.setAttribute('aria-busy', 'true');
       try {
-        const response = review
+        const response = applying ? await fetch('/api/profile/compare-draft', { method: 'POST', signal: active.signal,
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(transferInput()) }) : review
           ? await fetch('/api/profile/review', { method: 'POST', signal: active.signal,
               headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reviewInput()) })
           : await fetch(`/api/profile/compare?${query}`, { signal: active.signal, cache: 'no-store' });
@@ -4205,14 +4260,25 @@
       }
     }
 
-    if (!profile) {
-      sides[0].profile.value = current.id;
-      sides[1].profile.value = other.id;
-    }
     const versions = (state.history?.[current.id] || []).map(item => item.version).sort((a, b) => b - a);
-    fillVersions(sides[0], review ? current.publishedVersion
-      : profile ? version ?? versions.find(value => value !== current.publishedVersion) : current.publishedVersion);
-    fillVersions(sides[1], review ? 'draft' : other.publishedVersion);
+    function initSides() {
+      if (!profile) {
+        sides[0].profile.value = applying ? other.id : current.id;
+        sides[1].profile.value = applying ? current.id : other.id;
+      }
+      fillVersions(sides[0], review ? current.publishedVersion
+        : profile ? version ?? versions.find(value => value !== current.publishedVersion)
+          : applying ? other.publishedVersion : current.publishedVersion);
+      fillVersions(sides[1], review || applying ? 'draft' : other.publishedVersion);
+      updateComparisonSides();
+    }
+    initSides();
+    if (mode) mode.onclick = () => {
+      if (restoring) return;
+      applying = !applying;
+      initSides();
+      compare();
+    };
     for (const side of sides) {
       side.profile?.addEventListener('change', () => { fillVersions(side); compare(); });
       side.version.addEventListener('change', compare);
@@ -4228,6 +4294,53 @@
       showUpstream = !showUpstream;
       renderSection();
     };
+    if (canApply) {
+      async function changeDraft(button, change) {
+        if (restoring) return;
+        const entry = state.compareUndos.get(current.id);
+        const input = change ? { ...transferInput(), change, changeSet: data.changeSet }
+          : { profileId: current.id, revision: editedProfile().revision, undoToken: entry?.token };
+        const path = change ? 'apply-change' : 'undo-change';
+        restoring = true;
+        page.querySelectorAll('button, select').forEach(control => { control.disabled = true; });
+        try {
+          const send = async payload => {
+            const reply = await fetch('/api/profile/' + path, { method: 'POST',
+              headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const result = await reply.json();
+            if (!reply.ok) throw new Error([result.error, ...(result.details || [])].filter(Boolean).join('。'));
+            return result;
+          };
+          let result = await send(input);
+          if (result.dependencies) {
+            if (!await confirmCompareDependencies(result.dependencies)) return;
+            result = await send({ ...input, includeDependencies: true });
+          }
+          if (result.undoToken) state.compareUndos.set(current.id, { token: result.undoToken, revision: result.profile.revision });
+          else state.compareUndos.delete(current.id);
+          replaceProfile(result.profile);
+          updateTopbarBadges();
+          renderCurrentView();
+          const position = scroll.scrollTop;
+          await compare();
+          scroll.scrollTop = position;
+          showToast(change ? '已应用到草稿' : '已撤销上一步', 'success');
+          (page.querySelector('.compare-categories [aria-pressed="true"]') || mode).focus({ preventScroll: true });
+        } catch (error) {
+          showToast(error.message, 'error');
+        } finally {
+          restoring = false;
+          page.querySelectorAll('button, select').forEach(control => { control.disabled = false; });
+          updateComparisonSides();
+          if (button.isConnected) button.focus({ preventScroll: true });
+        }
+      }
+      results.addEventListener('click', event => {
+        const button = event.target.closest('[data-restore]');
+        if (applying && button) changeDraft(button, button.dataset.restore);
+      });
+      undo.onclick = () => changeDraft(undo);
+    }
     if (review) {
       page.addEventListener('click', async event => {
         const button = event.target.closest('[data-restore]');
@@ -4277,6 +4390,33 @@
     document.body.appendChild(page);
     page.querySelector('h1').focus();
     compare();
+  }
+
+  function confirmCompareDependencies(dependencies) {
+    const effects = [
+      ...dependencies.groups.map(name => `加入策略组「${name}」`),
+      ...dependencies.sources.map(name => `启用订阅源「${name}」`),
+      ...dependencies.groupsUpdated.map(name => `从「${name}」移除被删除的组`),
+      dependencies.rulesRemoved ? `删除引用此组的 ${dependencies.rulesRemoved} 条规则` : ''
+    ].filter(Boolean);
+    const dialog = document.createElement('dialog');
+    dialog.className = 'dialog-box node-picker group-setup-dialog group-delete-dialog';
+    dialog.setAttribute('aria-labelledby', 'compareDependenciesTitle');
+    dialog.innerHTML = `<form method="dialog">
+      <div class="dialog-header"><h2 class="panel-title" id="compareDependenciesTitle">一并调整相关配置？</h2></div>
+      <div class="dialog-body"><ul>${effects.map(effect => `<li>${escapeHtml(effect)}</li>`).join('')}</ul></div>
+      <div class="dialog-footer">
+        <button class="btn btn-default" value="cancel" autofocus>取消</button>
+        <button class="btn btn-primary" value="apply">一并应用到草稿</button>
+      </div></form>`;
+    return new Promise(resolve => {
+      dialog.addEventListener('close', () => {
+        dialog.remove();
+        resolve(dialog.returnValue === 'apply');
+      }, { once: true });
+      el.modalContainer.appendChild(dialog);
+      dialog.showModal();
+    });
   }
 
   function renderHistoryView() {

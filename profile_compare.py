@@ -6,6 +6,9 @@ from difflib import SequenceMatcher
 from functools import partial
 import json
 import re
+from uuid import uuid4
+
+from profile_transfer import raw_rule_parts, rule_policy
 
 
 MISSING = object()
@@ -85,7 +88,7 @@ def sequence_changes(left, right, label=''):
     ]
 
 
-def pair_rules(left, right, old_keys, new_keys):
+def pair_rules(left, right, old_keys, new_keys, ids=None):
     old_by_line, old_by_matcher = defaultdict(deque), defaultdict(deque)
     for index, (line, key) in enumerate(zip(left, old_keys)):
         old_by_line[line].append(index)
@@ -95,6 +98,13 @@ def pair_rules(left, right, old_keys, new_keys):
         if old_by_line[line]:
             matches[index] = old_by_line[line].popleft()
     paired = set(matches.values())
+    if ids:
+        by_id = {identity: index for index, identity in enumerate(ids[0]) if identity}
+        for new, identity in enumerate(ids[1]):
+            old = by_id.get(identity)
+            if old is not None and old not in paired and new not in matches:
+                matches[new] = old
+                paired.add(old)
     for index, key in enumerate(new_keys):
         if index in matches:
             continue
@@ -195,13 +205,19 @@ def groups_diff(left, right, left_doc, right_doc, source_names):
             continue
         before, after = a[name], b[name]
         first, second = group_selection(before), group_selection(after)
-        details = sequence_changes(first[0], second[0], '固定候选 · ')
-        details.extend(sequence_changes(selector_labels(first[1], source_names), selector_labels(second[1], source_names), '订阅筛选 · '))
-        details.extend(sequence_changes(first[2], second[2], '优先级 · '))
-        details.extend(sequence_changes(first[3], second[3], '排除候选 · '))
+        details = []
+        for index, (label, path) in enumerate([
+            ('固定候选 · ', ['members']), ('订阅筛选 · ', ['selectors']),
+            ('优先级 · ', ['options', 'priority']), ('排除候选 · ', ['options', 'excluded']),
+        ]):
+            values = [first[index], second[index]]
+            if index == 1:
+                values = [selector_labels(value, source_names) for value in values]
+            details.extend({**item, 'listPath': path} for item in sequence_changes(*values, label))
         before_type, after_type = before.get('type'), after.get('type')
         if before_type != after_type:
-            details.append(change('策略组类型', GROUP_TYPES.get(before_type, before_type), GROUP_TYPES.get(after_type, after_type)))
+            details.append({**change('策略组类型', GROUP_TYPES.get(before_type, before_type),
+                                     GROUP_TYPES.get(after_type, after_type)), 'typeChange': True})
         if by_name and name in by_name[0] and name in by_name[1]:
             emitted = [groups[name] for groups in by_name]
             heads = [next(iter(group.get('proxies', [])), MISSING) for group in emitted]
@@ -251,7 +267,7 @@ def label_public_rule_sets(changes, profiles):
     return changes
 
 
-def compare_profiles(left, right, sources, company, parse, compile_draft):
+def compare_profiles(left, right, sources, company, parse, compile_draft, *, authored=False):
     def materialize(side):
         if side.get('document') is not None:
             return side['document']
@@ -264,7 +280,7 @@ def compare_profiles(left, right, sources, company, parse, compile_draft):
     a_doc, b_doc = materialize(left), materialize(right)
     exact = a_doc is not None and b_doc is not None
     a, b = left['profile'], right['profile']
-    cfg_a, cfg_b = (a_doc, b_doc) if exact else (a, b)
+    cfg_a, cfg_b = (a_doc, b_doc) if exact and not authored else (a, b)
     source_names = {s['id']: s['name'] for s in sources}
     sections = []
 
@@ -272,7 +288,7 @@ def compare_profiles(left, right, sources, company, parse, compile_draft):
         if items:
             sections.append({'title': title, 'items': items})
 
-    section('策略组', groups_diff(a, b, a_doc, b_doc, source_names))
+    section('策略组', groups_diff(a, b, None if authored else a_doc, None if authored else b_doc, source_names))
     custom_a, custom_b = (profile.get('nodes', []) for profile in (a, b))
     section('自定义节点', nodes_diff(custom_a, custom_b))
     upstream = []
@@ -292,12 +308,20 @@ def compare_profiles(left, right, sources, company, parse, compile_draft):
         section('分流规则', sequence_changes(definitions(a), definitions(b)))
     else:
         section('分流规则', label_public_rule_sets(rules_diff(a_rules, b_rules), (a, b)))
-    settings_a, settings_b = (a_doc, b_doc) if exact else (a.get('network', {}), b.get('network', {}))
+    settings_a, settings_b = (a_doc, b_doc) if exact and not authored else (a.get('network', {}), b.get('network', {}))
     for title, key in [('DNS', 'dns'), ('TUN', 'tun')]:
         section(title, field_changes(settings_a.get(key, {}) or {}, settings_b.get(key, {}) or {}))
     section('Hosts', field_changes(cfg_a.get('hosts', {}) or {}, cfg_b.get('hosts', {}) or {}, labels=False))
-    section('订阅来源', sequence_changes([source_names.get(s, s) for s in a.get('sourceIds', [])],
-                                         [source_names.get(s, s) for s in b.get('sourceIds', [])]))
+    a_sources, b_sources = a.get('sourceIds', []), b.get('sourceIds', [])
+    if authored:
+        source_changes = sequence_changes(a_sources, b_sources)
+        for item in source_changes:
+            sid = a_sources[item['beforeIndex']] if 'beforeIndex' in item else b_sources[item['afterIndex']]
+            item['name'] = source_names.get(sid, sid)
+    else:
+        source_changes = sequence_changes([source_names.get(s, s) for s in a_sources],
+                                          [source_names.get(s, s) for s in b_sources])
+    section('订阅来源', source_changes)
     return {'sections': sections, 'upstream': upstream, 'complete': [a_doc is not None, b_doc is not None]}
 
 
@@ -324,14 +348,21 @@ def restore_list_item(values, baseline, old, new, positions):
         values.insert(min(index, len(values)), copy.deepcopy(baseline[old]))
 
 
-def rule_review_rows(before, after):
+def rule_review_rows(before, after, semantic=False, same_profile=False):
     def identity(rule):
+        if semantic and rule.get('type') == 'RAW' and isinstance(rule.get('value'), str):
+            parts = raw_rule_parts(rule['value'])
+            if len(parts) > 1:
+                return parts[0], ','.join(parts[1:-1])
         return rule.get('type'), rule.get('value')
 
     def summary(rule):
         if rule is None:
             return MISSING
-        tags = [rule.get('target', ''), '启用' if rule.get('enabled', True) else '停用']
+        target = rule.get('target', '')
+        if semantic and rule.get('type') == 'RAW':
+            _, target = rule_policy(rule)
+        tags = [target, '启用' if rule.get('enabled', True) else '停用']
         if rule.get('noResolve'):
             tags.append('跳过 DNS 解析')
         snapshot = rule.get('publicSet')
@@ -339,26 +370,36 @@ def rule_review_rows(before, after):
             tags.append('规则集 ' + snapshot['version'][:10])
         return ' · '.join(tags)
 
-    a, b = [[json.dumps(rule, sort_keys=True, ensure_ascii=False) for rule in rules] for rules in (before, after)]
-    matches, paired, moved = pair_rules(a, b, list(map(identity, before)), list(map(identity, after)))
+    def encoded(rule):
+        return json.dumps({key: value for key, value in rule.items() if not semantic or key != 'id'},
+                          sort_keys=True, ensure_ascii=False)
+
+    a, b = [[encoded(rule) for rule in rules] for rules in (before, after)]
+    ids = [[rule.get('id') for rule in rules] for rules in (before, after)] if same_profile else None
+    matches, paired, moved = pair_rules(a, b, list(map(identity, before)), list(map(identity, after)), ids)
     indices = [(matches.get(index), index) for index in range(len(after))]
     indices += [(index, None) for index in range(len(before)) if index not in paired]
     for old, new in indices:
         previous = before[old] if old is not None else None
         current = after[new] if new is not None else None
-        moved_only = old in moved and previous == current
-        if not moved_only and previous == current:
+        same = old is not None and new is not None and a[old] == b[new]
+        moved_only = old in moved and same
+        if not moved_only and same:
             continue
         kind, value = identity(current or previous)
         label = '公司共享网段' if kind == 'COMPANY' else '兜底规则' if kind == 'MATCH' else ' · '.join(filter(None, (kind, value)))
-        item = change(label, summary(previous), summary(current), 'moved' if moved_only else None)
+        summaries = [summary(previous), summary(current)]
+        if previous and current and identity(previous) != identity(current):
+            summaries = [' · '.join(filter(None, (*identity(rule), str(info))))
+                         for rule, info in zip((previous, current), summaries)]
+        item = change(label, *summaries, 'moved' if moved_only else None)
         item['beforePosition'] = old + 1 if old is not None else None
         item['afterPosition'] = new + 1 if new is not None else None
         item['alsoMoved'] = old in moved and not moved_only
         yield item, old, new, old in moved
 
 
-def make_draft_review(comparison, published, current, frozen):
+def make_draft_review(comparison, published, current, frozen, *, transfer=False):
     """Attach restore operations to writable draft rows, using the server's published baseline."""
     baseline = copy.deepcopy(published)
     compiled_groups = {group['name']: group for group in frozen.get('proxy-groups', [])}
@@ -378,7 +419,21 @@ def make_draft_review(comparison, published, current, frozen):
 
     def list_action(item, field, old, new, *, positions=True, label='恢复此项'):
         def apply(draft):
-            restore_list_item(draft.setdefault(field, []), baseline.get(field, []), old, new, positions)
+            values = draft.setdefault(field, [])
+            if transfer and field == 'rules':
+                transfer_rule(values, baseline.get(field, []), old, new, positions)
+            elif transfer and field == 'groups' and item['kind'] == 'moved':
+                values.insert(min(old, len(values) - 1), values.pop(new))
+            else:
+                previous_id = values[new].get('id') if transfer and field == 'groups' and new is not None else None
+                restore_list_item(values, baseline.get(field, []), old, new, positions)
+                if transfer and field == 'groups' and old is not None:
+                    index = min(old if new is None or positions else new, len(values) - 1)
+                    inserted = values[index]
+                    if previous_id:
+                        inserted['id'] = previous_id
+                    elif not inserted.get('id') or sum(item.get('id') == inserted['id'] for item in values) > 1:
+                        inserted['id'] = 'merged-' + uuid4().hex[:12]
             if field == 'nodes':
                 managed = set(draft.get('customNodeNames', []))
                 name = item['nodeName']
@@ -390,21 +445,22 @@ def make_draft_review(comparison, published, current, frozen):
                     draft['customNodeNames'] = sorted(managed)
         assign(item, (field, old, new), apply, label)
 
-    if published.get('name') != current.get('name'):
+    if not transfer and published.get('name') != current.get('name'):
         item = change('配置名称', published.get('name'), current.get('name'))
         assign(item, ('name',), partial(set_from_baseline, baseline=baseline, path=('name',)))
         comparison['sections'].insert(0, {'title': '配置名称', 'items': [item]})
 
     old_rules, new_rules = [profile.get('rules', []) for profile in (baseline, current)]
     authored_rules = []
-    for item, old, new, moved in rule_review_rows(old_rules, new_rules):
+    for item, old, new, moved in rule_review_rows(old_rules, new_rules, semantic=transfer,
+                                                  same_profile=transfer and baseline['id'] == current['id']):
         list_action(item, 'rules', old, new, positions=moved, label='恢复此规则')
         authored_rules.append(item)
-    if authored_rules:
-        rules_section = next((section for section in comparison['sections'] if section['title']=='分流规则'), None)
+    rules_section = next((section for section in comparison['sections'] if section['title']=='分流规则'), None)
+    if authored_rules or transfer:
         if rules_section:
             rules_section['items'] = authored_rules
-        else:
+        elif authored_rules:
             comparison['sections'].append({'title':'分流规则', 'items':authored_rules})
 
     old_groups, new_groups = [{group['name']: index for index, group in enumerate(profile.get('groups', []))}
@@ -413,8 +469,12 @@ def make_draft_review(comparison, published, current, frozen):
                            for profile in (baseline, current)]
     for section in comparison['sections']:
         title = section['title']
+        if transfer and title == '策略组' and baseline['id'] == current['id']:
+            attach_group_renames(section, baseline, current, old_groups, new_groups, assign)
         for item in section['items']:
             if title == '策略组':
+                if item.get('restore'):
+                    continue
                 name = item['name']
                 old, new = old_groups.get(name), new_groups.get(name)
                 if old is None and new is None:
@@ -424,6 +484,8 @@ def make_draft_review(comparison, published, current, frozen):
                     continue
                 base_group = baseline['groups'][old]
                 for child in item.get('details', []):
+                    if transfer and attach_group_row(child, old, new, base_group, assign):
+                        continue
                     path = child.get('fieldPath', [])
                     if len(path) != 1 or path[0] not in {'tolerance', 'interval', 'url', 'lazy', 'timeout', 'disable-udp'}:
                         continue
@@ -449,4 +511,86 @@ def make_draft_review(comparison, published, current, frozen):
             elif title == '自定义节点':
                 name = item['nodeName']
                 list_action(item, 'nodes', old_nodes.get(name), new_nodes.get(name), positions=False, label='恢复此节点')
+    if transfer:
+        comparison['sections'] = [section for section in comparison['sections'] if section['items']]
     return baseline, actions
+
+
+def transfer_rule(values, baseline, old, new, move):
+    existing = values.pop(new) if new is not None else None
+    if old is None:
+        return
+    rule = copy.deepcopy(baseline[old])
+    if existing is not None and 'id' in existing:
+        rule['id'] = existing['id']
+    elif not rule.get('id') or rule['id'] in {item.get('id') for item in values}:
+        rule['id'] = 'merged-' + uuid4().hex[:12]
+    index = min(old, len(values)) if move or new is None else new
+    if move or new is None:
+        def same_matcher(before, after):
+            return (before.get('type'), before.get('value')) == (after.get('type'), after.get('value'))
+
+        for next_rule in baseline[old + 1:]:
+            anchor = next((i for i, item in enumerate(values) if same_matcher(next_rule, item)), None)
+            if anchor is not None:
+                index = anchor
+                break
+        if rule.get('type') != 'MATCH':
+            index = min(index, next((i for i, item in enumerate(values) if item.get('type') == 'MATCH'), len(values)))
+    values.insert(index, rule)
+
+
+def attach_group_renames(section, baseline, current, old_groups, new_groups, assign):
+    current_by_id = {group['id']: group['name'] for group in current.get('groups', []) if group.get('id')}
+    renames = {}
+    target_nodes = {node['name'] for node in current.get('nodes', [])}
+    for group in baseline.get('groups', []):
+        name = group['name']
+        other = current_by_id.get(group.get('id'))
+        if other and name not in new_groups and other not in old_groups and name not in target_nodes:
+            renames[other] = name
+    if not renames:
+        return
+    section['items'] = [item for item in section['items'] if
+                        not ((item['kind'] == 'added' and current['groups'][item['afterIndex']]['name'] in renames) or
+                             (item['kind'] == 'removed' and baseline['groups'][item['beforeIndex']]['name'] in renames.values()))]
+    for old, new in renames.items():
+        index = new_groups[old]
+        item = change('策略组名称', new, old)
+        assign(item, ('group-name', index), lambda draft, i=index, name=new: draft['groups'][i].update(name=name))
+        section['items'].insert(0, item)
+
+
+def attach_group_row(item, old, new, source, assign):
+    path = item.get('listPath')
+    if path:
+        before, after = item.get('beforeIndex'), item.get('afterIndex')
+
+        def apply(draft):
+            destination = draft['groups'][new]
+            original = source
+            for key in path[:-1]:
+                destination = destination.setdefault(key, {})
+                original = original.get(key, {})
+            key = path[-1]
+            values = destination.setdefault(key, [])
+            restore_list_item(values, original.get(key, []), before, after, positions=True)
+            if not values and key not in original:
+                destination.pop(key, None)
+
+        assign(item, ('group-list', old, new, *path, before, after), apply)
+        return True
+    if item.get('typeChange'):
+        assign(item, ('group-type', old, new), lambda draft: draft['groups'][new].update(type=source['type']))
+        return True
+    path = item.get('fieldPath')
+    if not path:
+        return False
+
+    def apply(draft):
+        group = draft['groups'][new]
+        for section in ('extra', 'options'):
+            set_from_baseline(group, source, (section, *path))
+
+    assign(item, ('group-field', old, new, *path), apply)
+    return True

@@ -2,11 +2,13 @@
 
 import copy
 import gzip
+import hashlib
 import ipaddress
 import json
 import re
 import time
 import urllib.parse
+from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,6 +23,7 @@ from backend.store import Problem, clean_profile, js
 from backend.subscription_parser import parse_source_nodes
 from live_backend import inventory, prepare_profile
 from profile_compare import compare_profiles, make_draft_review
+from profile_transfer import rule_policy, transfer_dependencies
 from workbench_probe import WorkbenchProbe
 
 
@@ -143,14 +146,6 @@ def retarget_references(profile, renames):
     return profile
 
 
-def rule_policy(rule):
-    if rule.get('type') != 'RAW' or not isinstance(rule.get('value'), str):
-        return rule.get('type'), rule.get('target')
-    parts = [item.strip() for item in rule['value'].split(',')]
-    index = -2 if len(parts) > 1 and parts[-1] == 'no-resolve' else -1
-    return parts[0], parts[index]
-
-
 def dns_uses_policy(value, policy):
     if isinstance(value, str):
         return value.partition('#')[2].partition('&')[0] == policy
@@ -266,6 +261,7 @@ class WorkbenchAPI:
     def __init__(self, store, distribution):
         self.store = store
         self.distribution = distribution
+        self.compare_undos = {}
         with store.lock, store.db:
             if store.db.execute("SELECT 1 FROM meta WHERE key='customNodes'").fetchone() is None:
                 profiles = [json.loads(row['body']) for row in store.db.execute('SELECT body FROM profiles ORDER BY rowid')]
@@ -362,6 +358,79 @@ class WorkbenchAPI:
                 store.save(row['id'], target, row['revision'])
             return {'profile': self.profile_status(store._row(row['id']))}
 
+    def compare_to_draft(self, data, apply=False):
+        store = self.store
+        with store.lock, store.db:
+            row = store._row(data.get('profileId'))
+            store._check_revision(row, data.get('revision'))
+            current = json.loads(row['body'])
+            published = json.loads(store._version(row['id'], row['published'])['body']) if row['published'] else None
+            draft = self.merge_draft(current, data.get('currentProfile'), published)
+            source_id, version = data.get('sourceId'), data.get('sourceVersion')
+            if source_id == row['id'] and version == 'draft':
+                raise Problem('请选择当前草稿以外的版本。', 422)
+            source = self.snapshot(source_id, version)
+            source_profile = source['profile']
+            sources, company = store._get('sources'), store._get('company')
+            comparison = compare_profiles(source, {'version': 'draft', 'profile': normalize_profile(draft)},
+                                          sources, company, parse_yaml, self.draft_document, authored=True)
+            _, actions = make_draft_review(comparison, source_profile, draft, {}, transfer=True)
+            inputs = [source_profile, draft, store._get('sourcesRevision'), store._get('customNodesRevision'), company]
+            signature = hashlib.sha256(json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            if not apply:
+                comparison['changeSet'] = signature
+                return comparison
+            requested = data.get('change')
+            if data.get('changeSet') != signature or not isinstance(requested, str) or requested not in actions:
+                raise Problem('这项差异已改变，请重新对比后再应用。', 409)
+            target = copy.deepcopy(draft)
+            actions[requested](target)
+            target = reconcile_group_names(target, draft)
+            catalog = store._get('customNodes')
+            dependencies = transfer_dependencies(draft, target, source_profile, sources, catalog)
+            surviving = {group['name'] for group in target.get('groups', [])}
+            removed = {group['name'] for group in draft.get('groups', [])} - surviving
+            dependencies['rulesRemoved'] = sum(rule_policy(rule)[1] in removed for rule in target.get('rules', []))
+            dependencies['groupsUpdated'] = [
+                group['name'] for group in target.get('groups', []) if removed.intersection(group.get('members', []))
+            ]
+            target, _ = clean_deleted_groups(target, {}, None, draft)
+            target = select_nodes(target, catalog)
+            if target == draft:
+                raise Problem('这项设置仍被当前配置引用，请先调整引用后再应用。', 422)
+            after_result, _ = compile_profile(target, sources, company)
+            if not after_result['ok']:
+                before_result, _ = compile_profile(draft, sources, company)
+                existing = {error['message'] for error in before_result['errors']}
+                errors = [error['message'] for error in after_result['errors'] if error['message'] not in existing]
+                if errors:
+                    raise Problem('应用会让当前草稿无法通过校验', 422, details=errors)
+            if any(dependencies.values()) and data.get('includeDependencies') is not True:
+                return {'dependencies': dependencies}
+            store.save(row['id'], target, row['revision'])
+            result = self.profile_status(store._row(row['id']))
+            stack = self.compare_undos.setdefault(row['id'], deque(maxlen=20))
+            if stack and stack[-1]['revision'] != row['revision']:
+                stack.clear()
+            token = uuid4().hex
+            stack.append({'token': token, 'profile': draft, 'revision': result['revision']})
+            return {'profile': result, 'undoToken': token}
+
+    def undo_compare_change(self, data):
+        store = self.store
+        with store.lock, store.db:
+            row = store._row(data.get('profileId'))
+            store._check_revision(row, data.get('revision'))
+            stack = self.compare_undos.get(row['id'])
+            if not stack or stack[-1]['revision'] != row['revision'] or stack[-1]['token'] != data.get('undoToken'):
+                raise Problem('草稿已被修改或工作台已重启，无法撤销这项对比操作。', 409)
+            store.save(row['id'], stack[-1]['profile'], row['revision'])
+            stack.pop()
+            profile = self.profile_status(store._row(row['id']))
+            if stack:
+                stack[-1]['revision'] = profile['revision']
+            return {'profile': profile, 'undoToken': stack[-1]['token'] if stack else None}
+
     @staticmethod
     def public_snapshot(row):
         document = parse_yaml(row['yaml'])
@@ -387,7 +456,7 @@ class WorkbenchAPI:
                     **self.custom_nodes_data(),
                     'sources': [public_source(source, measurements.get(source['id'])) for source in self.store._get('sources')],
                     'nodeProbeAvailable': self.probe.available, 'groupProbeAvailable': self.probe.available,
-                    'defaultProbeUrl': DEFAULT_PROBE_URL, 'draftReviewAvailable': True,
+                    'defaultProbeUrl': DEFAULT_PROBE_URL, 'draftReviewAvailable': True, 'compareDraftAvailable': True,
                     'distribution': public_metadata(self.distribution, self.store, prefer_tailnet=bool(tailnet_admin))}
             if compact:
                 counts = {row['profile_id']: row['count'] for row in self.store.db.execute(
@@ -419,7 +488,8 @@ class WorkbenchAPI:
         if 'hosts' in updates:
             extras = result.get('extras', {})
             validate_host_changes(updates['hosts'], extras.get('hosts'))
-            result['extras'] = {**extras, 'hosts': updates['hosts']}
+            if 'hosts' in extras or updates['hosts']:
+                result['extras'] = {**extras, 'hosts': updates['hosts']}
             result.pop('hosts', None)
         for rule in result.get('rules', []):
             if 'publicSet' not in rule:
@@ -629,6 +699,10 @@ class WorkbenchAPI:
             action = path.rsplit('/', 1)[-1]
             if action in {'review', 'restore-change'}:
                 return handler.json(self.review_draft(data, restore=action == 'restore-change')) or True
+            if action in {'compare-draft', 'apply-change'}:
+                return handler.json(self.compare_to_draft(data, apply=action == 'apply-change')) or True
+            if action == 'undo-change':
+                return handler.json(self.undo_compare_change(data)) or True
             if action in {'create', 'duplicate', 'save-draft', 'discard-draft', 'rollback', 'publish'}:
                 return handler.json(self.mutate_profile(action, data)) or True
         if method == 'POST' and path.startswith('/api/source/'):
