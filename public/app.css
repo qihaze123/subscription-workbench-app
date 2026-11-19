@@ -1184,6 +1184,8 @@ body:has(> .profile-compare-page) > :is(.topbar, .app-container) { display: none
 .compare-item-title > :first-child { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
 .compare-item-actions { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .compare-restore-one { min-height: 28px; color: var(--primary); }
+.compare-unavailable-reason { padding: 0 14px 8px; color: var(--text-dim); font-size: 12px; overflow-wrap: anywhere; }
+.compare-dialer-dialog .dialog-body > p { margin: 0; }
 .compare-kind { flex: none; color: var(--text-dim); font-size: 12px; }
 [data-change="added"] .compare-kind { color: var(--success); }
 [data-change="removed"] .compare-kind { color: var(--danger); }

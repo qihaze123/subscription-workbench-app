@@ -4129,8 +4129,8 @@
     }
 
     function restoreButton(item) {
-      if ((!review && !applying) || !item.restore) return '';
-      const action = applying ? { added: '从草稿删除', removed: '新增到草稿',
+      if ((!review && !applying) || !item.restore || item.applyUnavailable) return '';
+      const action = applying && item.dialerChoice ? '选择前置代理' : applying ? { added: '从草稿删除', removed: '新增到草稿',
         changed: item.nodeName ? '替换此节点' : item.details ? '替换整组' : '替换此项',
         moved: '采用此顺序' }[item.kind] : item.restoreLabel;
       return `<button type="button" class="btn btn-subtle btn-sm compare-restore-one"
@@ -4138,11 +4138,13 @@
     }
 
     function difference(item) {
+      const reason = applying && item.applyUnavailable ? `<p class="compare-unavailable-reason">${escapeHtml(item.applyUnavailable)}</p>` : '';
       if (item.details) {
         const leading = item.details.find(change => change.name === '首个候选');
         const remaining = leading ? item.details.filter(change => change !== leading) : item.details;
         return `<li class="compare-group-change">
           <h3>${escapeHtml(item.name)} ${restoreButton(item)}</h3>
+          ${reason}
           ${leading ? `<ul class="compare-items">${difference(leading)}</ul>` : ''}
           ${remaining.length > 2 ? `<details class="compare-group-details"${leading ? '' : ' open'}>
             <summary>${escapeHtml(item.detailsLabel || '候选与设置变动')} <span>${remaining.length}</span></summary>
@@ -4167,7 +4169,8 @@
       const moved = item.kind === 'moved';
       return `<li class="compare-item" data-change="${kind}">
         <div class="compare-item-title"><span>${escapeHtml(item.name)}</span><span class="compare-item-actions">
-          <span class="compare-kind">${names[kind]}${item.alsoMoved ? '并调序' : ''}</span>${restoreButton(item)}</span></div>
+          ${reason ? '' : `<span class="compare-kind">${names[kind]}${item.alsoMoved ? '并调序' : ''}</span>${restoreButton(item)}`}</span></div>
+        ${reason}
         <div class="compare-values">${cell('before', leftLabel, moved ? '' : applying ? '+' : '−')}${cell('after', rightLabel, moved ? '' : applying ? '−' : '+')}</div>
       </li>`;
     }
@@ -4304,6 +4307,13 @@
         restoring = true;
         page.querySelectorAll('button, select').forEach(control => { control.disabled = true; });
         try {
+          const choice = change && data.sections.find(section => section.title === '自定义节点')
+            ?.items.find(item => item.restore === change)?.dialerChoice;
+          if (choice) {
+            const replacement = await chooseCompareDialer(choice, current.name);
+            if (replacement === null) return;
+            input.dialerReplacement = replacement;
+          }
           const send = async payload => {
             const reply = await fetch('/api/profile/' + path, { method: 'POST',
               headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -4315,6 +4325,10 @@
           if (result.dependencies) {
             if (!await confirmCompareDependencies(result.dependencies)) return;
             result = await send({ ...input, includeDependencies: true });
+          }
+          if (result.unchanged) {
+            showToast('草稿已使用这个前置代理。', 'info');
+            return;
           }
           if (result.undoToken) state.compareUndos.set(current.id, { token: result.undoToken, revision: result.profile.revision });
           else state.compareUndos.delete(current.id);
@@ -4390,6 +4404,37 @@
     document.body.appendChild(page);
     page.querySelector('h1').focus();
     compare();
+  }
+
+  function chooseCompareDialer(choice, profileName) {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'dialog-box node-picker group-setup-dialog group-delete-dialog compare-dialer-dialog';
+    dialog.setAttribute('aria-labelledby', 'compareDialerTitle');
+    dialog.innerHTML = `<form method="dialog">
+      <div class="dialog-header"><h2 class="panel-title" id="compareDialerTitle">选择前置代理</h2></div>
+      <div class="dialog-body">
+        <p><strong>${escapeHtml(choice.node)}</strong> · ${escapeHtml(profileName)}</p>
+        <p class="group-probe-hint" id="compareDialerHint">来源使用「${escapeHtml(choice.source)}」。请选择这份订阅可用的前置代理。</p>
+        <label for="compareDialerSelect">前置代理</label>
+        <select class="input-text" id="compareDialerSelect" required autofocus aria-describedby="compareDialerHint">
+          <option value="">请选择</option>
+          ${choice.options.map((option, index) => `<option value="${index}">${escapeHtml(option || '直接连接')}${option === choice.current ? '（当前）' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="dialog-footer">
+        <button class="btn btn-default" value="cancel" formnovalidate>取消</button>
+        <button class="btn btn-primary" value="apply">应用到草稿</button>
+      </div></form>`;
+    return new Promise(resolve => {
+      dialog.addEventListener('close', () => {
+        const select = dialog.querySelector('select');
+        const value = dialog.returnValue === 'apply' && select.value !== '' ? choice.options[Number(select.value)] : null;
+        dialog.remove();
+        resolve(value);
+      }, { once: true });
+      el.modalContainer.appendChild(dialog);
+      dialog.showModal();
+    });
   }
 
   function confirmCompareDependencies(dependencies) {

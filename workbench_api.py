@@ -23,7 +23,7 @@ from backend.store import Problem, clean_profile, js
 from backend.subscription_parser import parse_source_nodes
 from live_backend import inventory, prepare_profile
 from profile_compare import compare_profiles, make_draft_review
-from profile_transfer import rule_policy, transfer_dependencies
+from profile_transfer import comparison_node_actions, rule_policy, transfer_dependencies
 from workbench_probe import WorkbenchProbe
 
 
@@ -375,6 +375,8 @@ class WorkbenchAPI:
             comparison = compare_profiles(source, {'version': 'draft', 'profile': normalize_profile(draft)},
                                           sources, company, parse_yaml, self.draft_document, authored=True)
             _, actions = make_draft_review(comparison, source_profile, draft, {}, transfer=True)
+            catalog = store._get('customNodes')
+            blocked, dialer_choices = comparison_node_actions(comparison, draft, source_profile, catalog)
             inputs = [source_profile, draft, store._get('sourcesRevision'), store._get('customNodesRevision'), company]
             signature = hashlib.sha256(json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             if not apply:
@@ -383,10 +385,25 @@ class WorkbenchAPI:
             requested = data.get('change')
             if data.get('changeSet') != signature or not isinstance(requested, str) or requested not in actions:
                 raise Problem('这项差异已改变，请重新对比后再应用。', 409)
+            if requested in blocked:
+                raise Problem(blocked[requested], 422)
+            choice = dialer_choices.get(requested)
+            replacement = data.get('dialerReplacement')
+            if choice and replacement not in choice['options']:
+                raise Problem('请选择当前订阅可用的前置代理', 422)
             target = copy.deepcopy(draft)
-            actions[requested](target)
+            node = next((item for item in target['nodes'] if item['name'] == choice['node']), None) if choice else None
+            if node is None:
+                actions[requested](target)
+                if choice:
+                    node = next(item for item in target['nodes'] if item['name'] == choice['node'])
+                    target['customNodeNames'] = sorted(set(target.get('customNodeNames', [])) | {node['name']})
+            if choice:
+                if replacement:
+                    node['dialer-proxy'] = replacement
+                else:
+                    node.pop('dialer-proxy', None)
             target = reconcile_group_names(target, draft)
-            catalog = store._get('customNodes')
             dependencies = transfer_dependencies(draft, target, source_profile, sources, catalog)
             surviving = {group['name'] for group in target.get('groups', [])}
             removed = {group['name'] for group in draft.get('groups', [])} - surviving
@@ -397,6 +414,8 @@ class WorkbenchAPI:
             target, _ = clean_deleted_groups(target, {}, None, draft)
             target = select_nodes(target, catalog)
             if target == draft:
+                if choice:
+                    return {'unchanged': True}
                 raise Problem('这项设置仍被当前配置引用，请先调整引用后再应用。', 422)
             after_result, _ = compile_profile(target, sources, company)
             if not after_result['ok']:
