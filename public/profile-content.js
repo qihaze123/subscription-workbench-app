@@ -2,9 +2,9 @@
 (function (root) {
   function profileContentKey(profile) {
     if (!profile) return null;
-    const { id, updatedAt, publishedAt, publishedVersion, hasDraft, hasPendingSourceChanges, hasPendingConfiguration, revision, ...content } = profile;
+    const { id, updatedAt, publishedAt, publishedVersion, hasDraft, hasPendingSourceChanges, hasPendingConfiguration, revision, groupDeletionTargets, ...content } = profile;
     content.groups = (content.groups || []).map(group => {
-      const { extra, toleranceHint, probeUrlHint, ...fields } = group;
+      const { extra, toleranceHint, probeUrlHint, emptyFallbackHint, ...fields } = group;
       const { excluded, ...options } = group.options || {};
       if (excluded?.length) options.excluded = excluded;
       return extra && Object.keys(extra).length ? { ...fields, options, extra } : { ...fields, options };
@@ -15,6 +15,43 @@
     });
   }
 
+  function policyRuleTarget(rule) {
+    if (rule.type !== 'RAW' || typeof rule.value !== 'string') return rule.target;
+    const parts = rule.value.split(',');
+    return parts.at(parts.at(-1)?.trim() === 'no-resolve' ? -2 : -1)?.trim();
+  }
+
+  function isMatchRule(rule) {
+    return rule.type === 'MATCH' || (rule.type === 'RAW' && typeof rule.value === 'string' &&
+      rule.value.split(',')[0].trim() === 'MATCH');
+  }
+
+  function dnsUsesPolicy(value, name) {
+    if (typeof value === 'string') return value.split('#')[1]?.split('&')[0] === name;
+    return value && typeof value === 'object' && Object.values(value).some(child => dnsUsesPolicy(child, name));
+  }
+
+  function deletePolicyGroup(profile, id, replacement) {
+    const { name } = profile.groups.find(group => group.id === id);
+    profile.groups = profile.groups.filter(group => group.id !== id);
+    for (const group of profile.groups) {
+      group.members = (group.members || []).filter(member => member !== name);
+      for (const key of ['excluded', 'priority']) {
+        if (Array.isArray(group.options?.[key])) group.options[key] = group.options[key].filter(member => member !== name);
+      }
+    }
+    profile.rules = (profile.rules || []).filter(rule => policyRuleTarget(rule) !== name ||
+      (replacement && rule.enabled !== false && isMatchRule(rule)));
+    if (replacement) {
+      retargetGroupReferences(profile, new Map([[name, replacement]]));
+      profile.groupDeletionTargets = { ...profile.groupDeletionTargets, [name]: replacement };
+    } else if (profile.groupDeletionTargets) {
+      profile.groupDeletionTargets = Object.fromEntries(Object.entries(profile.groupDeletionTargets)
+        .filter(([, target]) => target !== name));
+    }
+    return profile;
+  }
+
   function retargetGroupReferences(profile, renames) {
     const target = name => renames.get(name) ?? name;
     for (const group of profile.groups || []) {
@@ -22,15 +59,20 @@
       for (const key of ['excluded', 'priority']) {
         if (Array.isArray(group.options?.[key])) group.options[key] = group.options[key].map(target);
       }
+      for (const fields of [group.options, group.extra]) {
+        if (fields?.['empty-fallback']) fields['empty-fallback'] = target(fields['empty-fallback']);
+      }
+      if (group.emptyFallbackHint) group.emptyFallbackHint = target(group.emptyFallbackHint);
     }
     for (const rule of profile.rules || []) {
       if (renames.has(rule.target)) rule.target = target(rule.target);
       if (rule.type === 'RAW' && typeof rule.value === 'string') {
         const parts = rule.value.split(',');
-        const index = parts.length - (parts.at(-1) === 'no-resolve' ? 2 : 1);
-        if (index > 0 && renames.has(parts[index])) {
-          parts[index] = target(parts[index]);
+        const index = parts.length - (parts.at(-1)?.trim() === 'no-resolve' ? 2 : 1);
+        if (index > 0 && renames.has(parts[index].trim())) {
+          parts[index] = target(parts[index].trim());
           rule.value = parts.join(',');
+          rule.target = parts[index];
         }
       }
     }
@@ -40,6 +82,10 @@
     if (profile.customNodeDialers) {
       profile.customNodeDialers = Object.fromEntries(Object.entries(profile.customNodeDialers)
         .map(([name, dialer]) => [name, target(dialer)]));
+    }
+    if (profile.groupDeletionTargets) {
+      profile.groupDeletionTargets = Object.fromEntries(Object.entries(profile.groupDeletionTargets)
+        .map(([name, replacement]) => [name, target(replacement)]));
     }
     function dnsTarget(value) {
       if (Array.isArray(value)) return value.map(dnsTarget);
@@ -71,7 +117,8 @@
     return renames.size ? retargetGroupReferences(structuredClone(profile), renames) : profile;
   }
 
-  const api = { profileContentKey, retargetGroupReferences, reconcileGroupNames };
+  const api = { profileContentKey, retargetGroupReferences, reconcileGroupNames, policyRuleTarget,
+    isMatchRule, dnsUsesPolicy, deletePolicyGroup };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else Object.assign(root, api);
 })(globalThis);

@@ -282,8 +282,8 @@
   // ========================================================
 
   function draftUpdates(profile) {
-    const { groups, rules, network, hosts, sourceIds, name, customNodeDialers } = profile;
-    return { groups, rules, network, hosts, sourceIds, name, customNodeDialers };
+    const { groups, rules, network, hosts, sourceIds, name, customNodeDialers, groupDeletionTargets } = profile;
+    return { groups, rules, network, hosts, sourceIds, name, customNodeDialers, groupDeletionTargets };
   }
 
   async function saveDraft() {
@@ -309,7 +309,10 @@
         throw new Error(json.error || `保存失败 (HTTP ${res.status})`);
       }
 
-      if (profileContentKey(prof) === requestedKey) prof.customNodeDialers = json.profile.customNodeDialers;
+      if (profileContentKey(prof) === requestedKey) {
+        prof.customNodeDialers = json.profile.customNodeDialers;
+        delete prof.groupDeletionTargets;
+      }
       prof.nodes = json.profile.nodes;
       acceptSavedProfile(prof, json.profile);
       const { dirty, pending } = getEditState(prof);
@@ -380,6 +383,7 @@
     state.profileWrites.add(prof.id);
     updateTopbarBadges();
     try {
+      const requestedKey = profileContentKey(prof);
       const res = await fetch('/api/profile/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -396,8 +400,12 @@
         throw new Error((json.error || '发布失败') + detailMsg);
       }
 
+      if (profileContentKey(prof) === requestedKey) {
+        prof.nodes = json.profile.nodes;
+        prof.customNodeDialers = json.profile.customNodeDialers;
+        delete prof.groupDeletionTargets;
+      }
       acceptSavedProfile(prof, json.profile);
-
       state.publishedSnapshots.set(`${prof.id}:${json.version}`, {
         version: json.version,
         publishedAt: json.publishedAt,
@@ -424,7 +432,7 @@
     const errors = [];
     const groupNames = (prof.groups || []).map(g => g.name);
     const nodeNames = (prof.nodes || []).map(n => n.name);
-    const validTargets = new Set([...groupNames, ...nodeNames, 'DIRECT', 'REJECT', 'PASS', 'GLOBAL']);
+    const validTargets = new Set([...groupNames, ...nodeNames, 'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL']);
 
     const nameSet = new Set();
     for (const name of groupNames) {
@@ -435,8 +443,9 @@
     }
 
     for (const r of prof.rules || []) {
-      if (!r.target || !validTargets.has(r.target)) {
-        errors.push(`规则 [${r.type}, ${r.value || ''}] 目标不存在: "${r.target}"`);
+      const target = policyRuleTarget(r);
+      if (r.enabled !== false && !validTargets.has(target)) {
+        errors.push(`规则 [${r.type}, ${r.value || ''}] 目标不存在: "${target}"`);
       }
     }
 
@@ -1129,13 +1138,7 @@
         };
       }
 
-      detailCol.querySelector('#deleteGroupBtn').onclick = () => {
-        if (!confirm(`确定删除策略组 "${currentGroup.name}" 吗？`)) return;
-        prof.groups = prof.groups.filter(g => g.id !== currentGroup.id);
-        state.selectedGroupId = prof.groups[0]?.id || null;
-        updateTopbarBadges();
-        renderGroupsView();
-      };
+      detailCol.querySelector('#deleteGroupBtn').onclick = () => confirmPolicyGroupDeletion(prof, currentGroup);
 
       const editMembers = detailCol.querySelector('#addManualMemberBtn');
       if (editMembers) editMembers.onclick = () => openGroupSetup(prof, currentGroup);
@@ -1148,6 +1151,75 @@
     el.mainStage.appendChild(container);
     refreshGroupProbeView?.();
     if (state.data.nodeProbeAvailable) scheduleProbePoll(0);
+  }
+
+  function confirmPolicyGroupDeletion(profile, group) {
+    const trigger = document.activeElement;
+    const name = group.name;
+    const rules = profile.rules.filter(rule => policyRuleTarget(rule) === name);
+    const fallbackCount = rules.filter(rule => rule.enabled !== false && isMatchRule(rule)).length;
+    const parents = profile.groups.filter(item => item.id !== group.id && item.members?.includes(name));
+    const emptyParents = parents.filter(item =>
+      !computeGroupCandidates(item, profile).candidates.some(candidate => candidate.name !== name));
+    const networkTarget = dnsUsesPolicy(profile.network?.dns, name) ||
+      (profile.nodes || []).some(node => node['dialer-proxy'] === name) ||
+      Object.values(profile.customNodeDialers || {}).includes(name);
+    const groupFallback = profile.groups.some(item => item.id !== group.id &&
+      (item.options?.['empty-fallback'] ?? item.emptyFallbackHint) === name);
+    const required = Boolean(fallbackCount || emptyParents.length || networkTarget || groupFallback);
+    const allGroups = new Map(profile.groups.map(item => [item.name, item]));
+    const replacements = ['DIRECT', 'REJECT', ...profile.groups.filter(item => item.id !== group.id &&
+      !emptyParents.some(parent => groupLeadsTo(item.name, parent.name, allGroups))).map(item => item.name)];
+    const effects = [
+      rules.length > fallbackCount ? `删除 ${rules.length - fallbackCount} 条分流规则` : '',
+      parents.length ? `从 ${parents.length} 个策略组移除此组` : '',
+      fallbackCount ? '兜底规则需要新的目标' : '',
+      emptyParents.length ? '失去最后一个候选的组需要新的成员' : '',
+      networkTarget ? 'DNS 或前置代理需要新的目标' : '',
+      groupFallback ? '策略组回退需要新的目标' : ''
+    ].filter(Boolean);
+    const dialog = document.createElement('dialog');
+    dialog.className = 'dialog-box node-picker group-setup-dialog group-delete-dialog';
+    dialog.setAttribute('aria-labelledby', 'groupDeleteTitle');
+    dialog.innerHTML = `
+      <form class="group-setup-form">
+        <div class="dialog-header"><h2 class="panel-title" id="groupDeleteTitle">删除策略组</h2></div>
+        <div class="dialog-body">
+          <p><strong>${escapeHtml(name)}</strong></p>
+          ${effects.length ? `<ul>${effects.map(effect => `<li>${escapeHtml(effect)}</li>`).join('')}</ul>` : ''}
+          ${required ? `<label for="groupDeleteReplacement">替代目标</label>
+          <select class="input-text" id="groupDeleteReplacement" required>
+            <option value="">请选择替代目标</option>
+            ${replacements.map(target => `<option value="${escapeHtml(target)}">${escapeHtml(target)}</option>`).join('')}
+          </select>` : ''}
+          <p class="group-probe-hint">改动先留在草稿，发布后才会生效。</p>
+        </div>
+        <div class="dialog-footer">
+          <button type="button" class="btn btn-default" data-cancel autofocus>取消</button>
+          <button type="submit" class="btn btn-danger">删除策略组</button>
+        </div>
+      </form>`;
+    dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
+    dialog.querySelector('form').onsubmit = event => {
+      event.preventDefault();
+      const replacement = dialog.querySelector('select')?.value;
+      deletePolicyGroup(profile, group.id, replacement);
+      if (replacement) for (const parent of emptyParents) {
+        parent.members.push(replacement);
+        if (parent.options?.excluded) parent.options.excluded = parent.options.excluded.filter(item => item !== replacement);
+      }
+      dialog.close();
+      state.selectedGroupId = profile.groups[0]?.id || null;
+      updateTopbarBadges();
+      renderGroupsView();
+      el.mainStage.querySelector('.group-row.active')?.focus({ preventScroll: true });
+    };
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    });
+    el.modalContainer.appendChild(dialog);
+    dialog.showModal();
   }
 
   function openGroupProbeSettings(trigger, current, defaultUrl, apply) {
@@ -4317,6 +4389,9 @@
     const dns = net.dns || {};
     const tun = net.tun || {};
     const hosts = prof.hosts || {};
+    const dnsMode = dns['enhanced-mode'] || '';
+    const dnsModes = [...new Set(['', 'fake-ip', 'redir-host', dnsMode])];
+    const lines = value => Array.isArray(value) ? value.join('\n') : '';
 
     const container = document.createElement('div');
     container.style.display = 'flex';
@@ -4327,7 +4402,7 @@
       <div class="panel">
         <div class="panel-header"><span class="panel-title">DNS 解析配置</span></div>
         <div class="panel-body" style="display: flex; flex-direction: column; gap: 12px;">
-          <div style="display: flex; gap: 24px;">
+          <div class="network-toggles">
             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
               <input type="checkbox" id="dnsEnable" ${dns.enable !== false ? 'checked' : ''} />
               <span>启用 DNS 增强解析</span>
@@ -4337,9 +4412,16 @@
               <span>启用 IPv6 解析</span>
             </label>
           </div>
-          <div>
-            <label style="display:block; margin-bottom: 4px; font-weight: 600;">解析模式 (Enhanced Mode)</label>
-            <input type="text" class="input-text" value="${escapeHtml(dns['enhanced-mode'] || 'fake-ip')}" readonly style="width: 220px;" />
+          <div class="network-field">
+            <label for="dnsMode">解析模式</label>
+            <select class="input-text" id="dnsMode">
+              ${dnsModes.map(mode => `<option value="${escapeHtml(mode)}" ${mode === dnsMode ? 'selected' : ''}>${escapeHtml(mode || '使用客户端默认')}</option>`).join('')}
+            </select>
+          </div>
+          <div class="network-field">
+            <label for="dnsNameserver">DNS 服务器</label>
+            <textarea class="input-text" id="dnsNameserver" rows="4" spellcheck="false" aria-describedby="dnsNameserverHint">${escapeHtml(lines(dns.nameserver))}</textarea>
+            <small id="dnsNameserverHint">每行一个服务器地址，保留配置中的顺序。</small>
           </div>
         </div>
       </div>
@@ -4347,17 +4429,20 @@
       <div class="panel">
         <div class="panel-header"><span class="panel-title">TUN 虚拟网卡路由</span></div>
         <div class="panel-body" style="display: flex; flex-direction: column; gap: 10px;">
-          <div>
+          <div class="network-toggles">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+              <input type="checkbox" id="tunEnable" ${tun.enable ? 'checked' : ''} />
+              <span>启用 TUN</span>
+            </label>
             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
               <input type="checkbox" id="tunAutoRoute" ${tun['auto-route'] !== false ? 'checked' : ''} />
               <span>自动接管系统路由 (Auto Route)</span>
             </label>
           </div>
-          <div>
-            <label style="display:block; margin-bottom: 4px; font-weight: 600;">直连绕过网段 (Route Exclude Address)</label>
-            <div class="code-preview" style="max-height: 120px;">
-              ${(tun['route-exclude-address'] || []).map(escapeHtml).join('\n')}
-            </div>
+          <div class="network-field">
+            <label for="tunRouteExclude">绕过 TUN 的网段</label>
+            <textarea class="input-text" id="tunRouteExclude" rows="5" spellcheck="false" aria-describedby="tunRouteExcludeHint">${escapeHtml(lines(tun['route-exclude-address']))}</textarea>
+            <small id="tunRouteExcludeHint">每行一个 CIDR，例如 192.168.1.0/24。${prof.companySync?.adjustTun ? '发布时会从绕过范围剔除公司网段，以便公司分流规则继续生效。' : ''}</small>
           </div>
         </div>
       </div>
@@ -4382,19 +4467,31 @@
       </div>
     `;
 
+    function updateField(section, field, value, isDefault) {
+      const original = state.savedProfiles.get(prof.id)?.network?.[section];
+      const fields = { ...prof.network?.[section] };
+      if (value === undefined || (!Object.hasOwn(original || {}, field) && isDefault)) delete fields[field];
+      else fields[field] = value;
+      prof.network = { ...prof.network };
+      if (Object.keys(fields).length || original) prof.network[section] = fields;
+      else delete prof.network[section];
+      updateTopbarBadges();
+    }
     for (const [id, section, field, defaultValue] of [
-      ['dnsEnable', 'dns', 'enable', true], ['dnsIpv6', 'dns', 'ipv6', false], ['tunAutoRoute', 'tun', 'auto-route', true]
+      ['dnsEnable', 'dns', 'enable', true], ['dnsIpv6', 'dns', 'ipv6', false],
+      ['tunEnable', 'tun', 'enable', false], ['tunAutoRoute', 'tun', 'auto-route', true]
     ]) {
-      container.querySelector('#' + id).onchange = event => {
-        const checked = event.target.checked;
-        const original = state.savedProfiles.get(prof.id)?.network?.[section];
-        const fields = { ...prof.network?.[section] };
-        if (!Object.hasOwn(original || {}, field) && checked === defaultValue) delete fields[field];
-        else fields[field] = checked;
-        prof.network = { ...prof.network };
-        if (Object.keys(fields).length || original) prof.network[section] = fields;
-        else delete prof.network[section];
-        updateTopbarBadges();
+      container.querySelector('#' + id).onchange = ({ target }) =>
+        updateField(section, field, target.checked, target.checked === defaultValue);
+    }
+    container.querySelector('#dnsMode').onchange = ({ target }) =>
+      updateField('dns', 'enhanced-mode', target.value || undefined);
+    for (const [id, section, field] of [
+      ['dnsNameserver', 'dns', 'nameserver'], ['tunRouteExclude', 'tun', 'route-exclude-address']
+    ]) {
+      container.querySelector('#' + id).oninput = ({ target }) => {
+        const values = target.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+        updateField(section, field, values, !values.length);
       };
     }
     el.mainStage.appendChild(container);

@@ -8,7 +8,7 @@ import urllib.parse
 from pathlib import Path
 from uuid import uuid4
 
-from backend.compiler import compile_profile as compile_clash, parse_yaml
+from backend.compiler import BUILTIN_MEMBERS, compile_profile as compile_clash, parse_yaml
 from backend.custom_nodes import change_catalog, migrate_profiles, public_node, select_nodes
 from backend.distribution import public_metadata
 from backend.local_data import hydrate
@@ -59,15 +59,19 @@ def retarget_references(profile, renames):
         for key in ('excluded', 'priority'):
             if isinstance(options.get(key), list):
                 options[key] = [target(name) for name in options[key]]
+        for fields in (options, group.get('extra') or {}):
+            if 'empty-fallback' in fields:
+                fields['empty-fallback'] = target(fields['empty-fallback'])
     for rule in profile.get('rules', []):
         if isinstance(rule.get('target'), str) and rule['target'] in renames:
             rule['target'] = target(rule['target'])
         if rule.get('type') == 'RAW' and isinstance(rule.get('value'), str):
             parts = rule['value'].split(',')
-            index = len(parts) - (2 if parts[-1] == 'no-resolve' else 1)
-            if index > 0 and parts[index] in renames:
-                parts[index] = target(parts[index])
+            index = len(parts) - (2 if parts[-1].strip() == 'no-resolve' else 1)
+            if index > 0 and parts[index].strip() in renames:
+                parts[index] = target(parts[index].strip())
                 rule['value'] = ','.join(parts)
+                rule['target'] = parts[index]
     for node in profile.get('nodes', []):
         if 'dialer-proxy' in node:
             node['dialer-proxy'] = target(node['dialer-proxy'])
@@ -89,15 +93,78 @@ def retarget_references(profile, renames):
     return profile
 
 
+def rule_policy(rule):
+    if rule.get('type') != 'RAW' or not isinstance(rule.get('value'), str):
+        return rule.get('type'), rule.get('target')
+    parts = [item.strip() for item in rule['value'].split(',')]
+    index = -2 if len(parts) > 1 and parts[-1] == 'no-resolve' else -1
+    return parts[0], parts[index]
+
+
+def dns_uses_policy(value, policy):
+    if isinstance(value, str):
+        return value.partition('#')[2].partition('&')[0] == policy
+    if isinstance(value, dict):
+        return any(dns_uses_policy(item, policy) for item in value.values())
+    return isinstance(value, list) and any(dns_uses_policy(item, policy) for item in value)
+
+
+def clean_deleted_groups(profile, replacements, dialers, *baselines):
+    active = {item.get('name') for item in [*profile.get('groups', []), *profile.get('nodes', [])]}
+    removed = {group['name'] for baseline in baselines for group in (baseline or {}).get('groups', []) if group.get('name')} - active
+    if not removed:
+        return profile, dialers
+    if not isinstance(replacements, dict):
+        raise Problem('策略组替代目标无效', 422)
+    replacements = {name: value for name, value in replacements.items() if name in removed}
+    if any(not isinstance(value, str) or value not in active | BUILTIN_MEMBERS for value in replacements.values()):
+        raise Problem('策略组替代目标无效', 422)
+    profile = copy.deepcopy(profile)
+    for name in removed:
+        replacement = replacements.get(name)
+        for group in profile.get('groups', []):
+            group['members'] = [member for member in group.get('members', []) if member != name]
+            for key in ('excluded', 'priority'):
+                options = group.get('options') or {}
+                if isinstance(options.get(key), list):
+                    options[key] = [member for member in options[key] if member != name]
+        retained = []
+        for rule in profile.get('rules', []):
+            kind, target = rule_policy(rule)
+            if target != name:
+                retained.append(rule)
+            elif kind == 'MATCH' and rule.get('enabled', True):
+                if not replacement:
+                    raise Problem(f'请为「{name}」的兜底规则选择替代目标', 422)
+                retained.append(rule)
+        profile['rules'] = retained
+        if replacement:
+            retarget_references(profile, {name: replacement})
+            if isinstance(dialers, dict):
+                dialers = {node: replacement if policy == name else policy for node, policy in dialers.items()}
+        elif (dns_uses_policy(profile.get('network', {}).get('dns'), name)
+              or any(node.get('dialer-proxy') == name for node in profile.get('nodes', []))
+              or (isinstance(dialers, dict) and name in dialers.values())
+              or any((group.get(field) or {}).get('empty-fallback') == name
+                     for group in profile.get('groups', []) for field in ('extra', 'options'))):
+            raise Problem(f'请为「{name}」的 DNS、前置代理或策略组回退设置选择替代目标', 422)
+    return profile, dialers
+
+
 def public_profile(profile):
     result = normalize_profile(profile)
     result.pop('extras', None)
     managed = set(result.pop('customNodeNames', []))
     result['customNodeDialers'] = {node['name']: node['dialer-proxy'] for node in result.get('nodes', [])
                                    if node['name'] in managed and node.get('dialer-proxy')}
-    result['nodes'] = [public_node(node, managed) for node in result.get('nodes', [])]
+    result['nodes'] = [{**public_node(node, managed), **(
+        {'dialer-proxy': node['dialer-proxy']} if node.get('dialer-proxy') else {}
+    )} for node in result.get('nodes', [])]
     for group in result.get('groups', []):
-        previous = (group.get('extra') or {}).get('tolerance')
+        extra = group.get('extra') or {}
+        previous = extra.get('tolerance')
+        if extra.get('empty-fallback'):
+            group['emptyFallbackHint'] = extra['empty-fallback']
         if 'url' not in (group.get('options') or {}) and (group.get('extra') or {}).get('url'):
             group['probeUrlHint'] = group['extra']['url']
         if type(previous) is int and 'tolerance' not in group.get('options', {}):
@@ -287,7 +354,8 @@ class WorkbenchAPI:
             raise Problem('缺少配置内容', 422)
         result = {**current, **{key: updates[key] for key in ('name', 'groups', 'rules', 'network', 'sourceIds') if key in updates}}
         extras = {group.get('id'): group.get('extra', {}) for group in current.get('groups', [])}
-        result['groups'] = [{**{key: value for key, value in group.items() if key not in {'toleranceHint', 'probeUrlHint', 'extra'}},
+        result['groups'] = [{**{key: value for key, value in group.items() if key not in {
+            'toleranceHint', 'probeUrlHint', 'emptyFallbackHint', 'extra'}},
                              'extra': extras.get(group.get('id'), {})} for group in result.get('groups', [])]
         for group in result['groups']:
             options = group.get('options') or {}
@@ -372,7 +440,9 @@ class WorkbenchAPI:
 
     def merge_draft(self, current, updates, published):
         target = self.merge(current, updates, published)
-        return select_nodes(target, self.store._get('customNodes'), updates.get('customNodeDialers'))
+        target, dialers = clean_deleted_groups(target, updates.get('groupDeletionTargets', {}),
+                                              updates.get('customNodeDialers'), current, published)
+        return select_nodes(target, self.store._get('customNodes'), dialers)
 
     def custom_nodes_data(self):
         nodes = self.store._get('customNodes')

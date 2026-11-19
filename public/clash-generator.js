@@ -35,14 +35,19 @@ function generateClashYaml(profile, sources, companySubnets, options = {}) {
     lines.push('dns:');
     lines.push(`  enable: ${dns.enable !== false}`);
     lines.push(`  ipv6: ${dns.ipv6 === true}`);
-    lines.push(`  enhanced-mode: ${dns['enhanced-mode'] || 'fake-ip'}`);
+    if (dns['enhanced-mode']) lines.push(`  enhanced-mode: ${dns['enhanced-mode']}`);
     lines.push('  fake-ip-range: 198.18.0.1/16');
     lines.push(`  respect-rules: ${dns['respect-rules'] !== false}`);
     lines.push(`  use-hosts: ${dns['use-hosts'] !== false}`);
     lines.push(`  use-system-hosts: ${dns['use-system-hosts'] !== false}`);
-    lines.push('  nameserver:');
-    lines.push('    - 223.5.5.5');
-    lines.push('    - 119.29.29.29');
+    if (Array.isArray(dns.nameserver) && !dns.nameserver.length) {
+      lines.push('  nameserver: []');
+    } else {
+      lines.push('  nameserver:');
+      for (const server of dns.nameserver || ['223.5.5.5', '119.29.29.29']) {
+        lines.push(`    - ${JSON.stringify(server)}`);
+      }
+    }
     lines.push('  fallback:');
     lines.push('    - 8.8.8.8');
     lines.push('    - 1.1.1.1');
@@ -50,17 +55,17 @@ function generateClashYaml(profile, sources, companySubnets, options = {}) {
   }
 
   // 3. TUN 配置
-  if (profile.network?.tun && profile.network.tun['auto-route'] !== undefined) {
+  if (profile.network?.tun && Object.keys(profile.network.tun).length) {
     const tun = profile.network.tun;
     lines.push('tun:');
-    lines.push('  enable: true');
+    lines.push(`  enable: ${tun.enable ?? (tun['auto-route'] !== undefined)}`);
     lines.push('  stack: system');
     lines.push(`  auto-route: ${tun['auto-route'] !== false}`);
     lines.push(`  auto-detect-interface: ${tun['auto-detect-interface'] !== false}`);
     if (tun['route-exclude-address'] && tun['route-exclude-address'].length > 0) {
       lines.push('  route-exclude-address:');
       for (const addr of tun['route-exclude-address']) {
-        lines.push(`    - "${addr}"`);
+        lines.push(`    - ${JSON.stringify(addr)}`);
       }
     }
     lines.push('');

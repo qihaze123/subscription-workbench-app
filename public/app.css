@@ -643,6 +643,13 @@ body {
 .group-rule-remove-dialog .dialog-body { gap: 4px; overflow-wrap: anywhere; }
 .group-rule-remove-dialog .dialog-body span { color: var(--text-muted); font-size: 13px; }
 .group-rule-remove-dialog .dialog-footer { justify-content: flex-end; }
+.group-delete-dialog { max-width: 420px; }
+.group-delete-dialog ul { margin: 0; padding-left: 1.25rem; }
+.network-toggles { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.network-field { display: grid; gap: 4px; max-width: 36rem; }
+.network-field textarea { width: 100%; resize: vertical; }
+.network-field select { width: fit-content; }
+.network-field small { color: var(--text-muted); }
 
 .node-item {
   background: var(--bg-surface-subtle);

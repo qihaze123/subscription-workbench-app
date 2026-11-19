@@ -13,7 +13,7 @@ const { createInterface } = require('node:readline');
 const { createGzip, gzip } = require('node:zlib');
 
 const { generateClashYaml } = require('./public/clash-generator');
-const { profileContentKey, reconcileGroupNames } = require('./public/profile-content');
+const { profileContentKey, reconcileGroupNames, retargetGroupReferences } = require('./public/profile-content');
 const { evaluateTarget, compareEvaluation, expandEffectiveRules } = require('./public/rule-matcher');
 
 const HOST = process.env.HOST || '127.0.0.1';
@@ -210,11 +210,12 @@ function publicProfile(profile) {
     customNodeDialers: Object.fromEntries((profile.nodes || []).filter(node => managed.has(node.name) && node['dialer-proxy'])
       .map(node => [node.name, node['dialer-proxy']])),
     nodes: (profile.nodes || []).map(({ name, type, hostname, profileId, server, port, username = '', password, 'dialer-proxy': dialerProxy = '' }) => {
-      if (!managed.has(name)) return { name, type };
+      if (!managed.has(name)) return { name, type, ...(dialerProxy && { 'dialer-proxy': dialerProxy }) };
       return type === 'tailscale' ? { name, type, custom: true, hostname, profileId }
         : { name, type, custom: true, server, port, username, dialerProxy, hasPassword: Boolean(password) };
     }),
-    groups: (profile.groups || []).map(({ extra, ...group }) => group)
+    groups: (profile.groups || []).map(({ extra, ...group }) => ({ ...group,
+      ...(extra?.['empty-fallback'] && { emptyFallbackHint: extra['empty-fallback'] }) }))
   };
 }
 
@@ -263,7 +264,7 @@ function mergeDraft(current, incoming, catalog, published) {
   const allowed = ['name', 'groups', 'rules', 'network', 'hosts', 'sourceIds'];
   const draft = Object.fromEntries(allowed.filter(key => Object.hasOwn(incoming, key)).map(key => [key, incoming[key]]));
   if (Array.isArray(draft.groups)) {
-    draft.groups = draft.groups.map(group => ({
+    draft.groups = draft.groups.map(({ emptyFallbackHint, ...group }) => ({
       ...group,
       extra: current.groups?.find(original => original.id === group.id)?.extra || {}
     }));
@@ -286,7 +287,15 @@ function mergeDraft(current, incoming, catalog, published) {
       rule.publicSet = { version, entries };
     }
   }
-  return reconcileGroupNames({ ...current, ...draft }, published, current);
+  const merged = reconcileGroupNames({ ...current, ...draft }, published, current);
+  const currentNames = new Set((merged.groups || []).map(group => group.name));
+  const previousNames = new Set([...(current.groups || []), ...(published?.groups || [])].map(group => group.name));
+  const replacements = Object.entries(incoming.groupDeletionTargets || {}).filter(([name]) =>
+    previousNames.has(name) && !currentNames.has(name));
+  if (replacements.some(([, target]) => !currentNames.has(target) && !['DIRECT', 'REJECT'].includes(target))) {
+    throw new Error('策略组替代目标无效');
+  }
+  return replacements.length ? retargetGroupReferences(structuredClone(merged), new Map(replacements)) : merged;
 }
 
 if (process.env.WORKBENCH_REQUIRE_LIVE === '1') {

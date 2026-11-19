@@ -163,6 +163,10 @@ def shape_errors(profile):
         if isinstance(tun, dict) and 'route-exclude-address' in tun:
             if not isinstance(tun['route-exclude-address'], list) or any(not isinstance(v, str) for v in tun['route-exclude-address']):
                 errors.append(issue('network.tun.route-exclude-address', '排除网段必须是字符串数组'))
+        dns = network.get('dns', {})
+        if isinstance(dns, dict) and 'nameserver' in dns:
+            if not isinstance(dns['nameserver'], list) or any(not isinstance(v, str) for v in dns['nameserver']):
+                errors.append(issue('network.dns.nameserver', 'DNS 服务器必须是字符串数组'))
     return errors
 
 
