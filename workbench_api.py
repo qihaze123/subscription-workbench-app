@@ -2,7 +2,9 @@
 
 import copy
 import gzip
+import ipaddress
 import json
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -30,6 +32,54 @@ def normalize_profile(profile):
     result = copy.deepcopy(profile)
     result['hosts'] = result.get('extras', {}).get('hosts', {})
     return result
+
+
+def validate_host_changes(hosts, previous):
+    if not isinstance(hosts, dict) or any(not isinstance(key, str) for key in hosts):
+        raise Problem('静态 Hosts 必须是域名映射', 422)
+
+    def domain_key(name):
+        return name.lower().removesuffix('.')
+
+    def is_domain(name, wildcard=False):
+        domain = domain_key(name)
+        if wildcard:
+            domain = re.sub(r'^(?:\+)?\.', '', domain)
+        return len(domain) <= 253 and all(
+            (wildcard and label == '*') or re.fullmatch(r'[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?', label)
+            for label in domain.split('.')
+        )
+
+    def is_ip(value):
+        if not isinstance(value, str) or '%' in value:
+            return False
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+
+    seen = set()
+    duplicate = set()
+    for name in hosts:
+        key = domain_key(name)
+        if key in seen:
+            duplicate.add(key)
+        seen.add(key)
+    previous = previous if isinstance(previous, dict) else {}
+    for name, target in hosts.items():
+        if name in previous and target == previous[name]:
+            continue
+        if not is_domain(name, wildcard=True):
+            raise Problem(f'无效的 Hosts 域名：{name}', 422)
+        if domain_key(name) in duplicate:
+            raise Problem(f'这份订阅已有该域名的映射：{name}', 422)
+        if isinstance(target, list):
+            if target and all(is_ip(value) for value in target):
+                continue
+        elif isinstance(target, str) and (is_ip(target) or (re.search(r'[a-z_]', target, re.I) and is_domain(target))):
+            continue
+        raise Problem(f'「{name}」需要有效的 IPv4、IPv6 地址或单个目标域名', 422)
 
 
 def reconcile_group_names(profile, *baselines):
@@ -367,7 +417,10 @@ class WorkbenchAPI:
                 except ValueError as error:
                     raise Problem(f'{group["name"]}：{error}', 422) from None
         if 'hosts' in updates:
-            result['extras'] = {**result.get('extras', {}), 'hosts': updates['hosts']}
+            extras = result.get('extras', {})
+            validate_host_changes(updates['hosts'], extras.get('hosts'))
+            result['extras'] = {**extras, 'hosts': updates['hosts']}
+            result.pop('hosts', None)
         for rule in result.get('rules', []):
             if 'publicSet' not in rule:
                 continue

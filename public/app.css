@@ -650,6 +650,18 @@ body {
 .network-field textarea { width: 100%; resize: vertical; }
 .network-field select { width: fit-content; }
 .network-field small { color: var(--text-muted); }
+.hosts-header { flex-wrap: wrap; }
+.hosts-header h2 { margin: 0; }
+#hostsCount { color: var(--text-muted); font-size: 12px; margin-inline-start: 6px; }
+.hosts-body { padding: 0; }
+.hosts-select-all { display: flex; align-items: center; gap: 8px; padding: 7px 12px; width: fit-content; }
+.hosts-select-all[hidden] { display: none; }
+.hosts-table :is(.hosts-domain, .hosts-target) { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.hosts-table .hosts-domain { color: var(--primary); background: none; }
+.hosts-check, .hosts-action { width: 1%; }
+.hosts-action { text-align: right; }
+.hosts-dialog { max-width: 460px; }
+.hosts-dialog .network-field { max-width: none; }
 
 .node-item {
   background: var(--bg-surface-subtle);
@@ -1225,9 +1237,19 @@ body:has(> .profile-compare-page) > :is(.topbar, .app-container) { display: none
   .version-row-actions { flex-direction: column; align-items: stretch; }
   .rule-table.hosts-table { display: block; min-width: 0; }
   .hosts-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .hosts-table tbody, .hosts-table tr, .hosts-table td { display: block; }
-  .hosts-table tr { border-bottom: 1px solid var(--border-subtle); padding: 8px 12px; }
-  .hosts-table td { padding: 1px 0; border: 0; white-space: normal; }
+  .hosts-table tbody { display: block; }
+  .hosts-table tbody tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 8px 12px;
+  }
+  .hosts-table tbody :is(td, th) { padding: 1px 0; border: 0; white-space: normal; }
+  .hosts-table .hosts-target { grid-column: 2; grid-row: 2; }
+  .hosts-table :is(.hosts-check, .hosts-action) { width: auto; grid-row: 1 / 3; }
+  .hosts-table .hosts-action { grid-column: 3; }
 }
 .group-setup-source { border-bottom: 1px solid var(--border-subtle); }
 .group-setup-source:last-child { border-bottom: 0; }

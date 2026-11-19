@@ -4382,13 +4382,158 @@
   // 视图 7：DNS 与 TUN
   // ========================================================
 
+  const hostKey = name => name.toLowerCase().replace(/\.$/, '');
+
+  function validHostDomain(name, wildcard = false) {
+    const domain = wildcard ? hostKey(name).replace(/^(?:\+)?\./, '') : hostKey(name);
+    return domain.length <= 253 && domain.split('.').every(label =>
+      (wildcard && label === '*') || /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/.test(label));
+  }
+
+  function validHostIp(address) {
+    if (!address.includes(':')) {
+      return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(address) &&
+        address.split('.').every(part => String(Number(part)) === part && Number(part) < 256);
+    }
+    if (!/^[0-9a-f:.]+$/i.test(address)) return false;
+    try {
+      return Boolean(new URL(`http://[${address}]/`).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function renderHostsPanel(panel, profile) {
+    const selected = new Set();
+    const selectAll = panel.querySelector('#hostsSelectAll');
+    const add = panel.querySelector('#hostsAdd');
+    const remove = panel.querySelector('#hostsRemove');
+    const rows = panel.querySelector('tbody');
+    const table = panel.querySelector('.rule-table-container');
+
+    function updateSelection() {
+      const count = Object.keys(profile.hosts || {}).length;
+      selectAll.checked = count > 0 && selected.size === count;
+      selectAll.indeterminate = selected.size > 0 && !selectAll.checked;
+      remove.hidden = !selected.size;
+      remove.textContent = `删除选中 (${selected.size})`;
+    }
+
+    function renderRows() {
+      const entries = Object.entries(profile.hosts || {});
+      panel.querySelector('#hostsCount').textContent = `${entries.length} 条`;
+      table.hidden = !entries.length;
+      selectAll.closest('label').hidden = !entries.length;
+      panel.querySelector('#hostsEmpty').hidden = Boolean(entries.length);
+      rows.innerHTML = entries.map(([name, target], index) => `
+        <tr>
+          <td class="hosts-check"><input type="checkbox" data-host-row="${index}" aria-label="选择 ${escapeHtml(name)}" ${selected.has(name) ? 'checked' : ''}></td>
+          <th scope="row" class="hosts-domain">${escapeHtml(name)}</th>
+          <td class="hosts-target">${escapeHtml(Array.isArray(target) ? target.join(', ') : target)}</td>
+          <td class="hosts-action"><button class="btn btn-subtle" type="button" data-edit-host="${index}" aria-label="编辑 ${escapeHtml(name)}">编辑</button></td>
+        </tr>
+      `).join('');
+      for (const input of rows.querySelectorAll('[data-host-row]')) {
+        input.onchange = () => {
+          const [name] = entries[input.dataset.hostRow];
+          if (input.checked) selected.add(name);
+          else selected.delete(name);
+          updateSelection();
+        };
+      }
+      for (const button of rows.querySelectorAll('[data-edit-host]')) {
+        button.onclick = () => editHost(entries[button.dataset.editHost][0], button);
+      }
+      updateSelection();
+    }
+
+    function editHost(original, trigger) {
+      const existing = profile.hosts || {};
+      const value = existing[original];
+      const dialog = document.createElement('dialog');
+      dialog.className = 'dialog-box node-picker group-setup-dialog hosts-dialog';
+      dialog.setAttribute('aria-labelledby', 'hostEditTitle');
+      dialog.innerHTML = `
+        <form>
+          <div class="dialog-header"><h2 class="panel-title" id="hostEditTitle">${original === undefined ? '新增映射' : '编辑映射'}</h2></div>
+          <div class="dialog-body">
+            <div class="network-field">
+              <label for="hostDomain">域名</label>
+              <input class="input-text" id="hostDomain" required autofocus spellcheck="false" autocapitalize="none"
+                placeholder="app.example.com" value="${escapeHtml(original ?? '')}">
+            </div>
+            <div class="network-field">
+              <label for="hostTarget">映射目标</label>
+              <textarea class="input-text" id="hostTarget" rows="3" required spellcheck="false" autocapitalize="none"
+                aria-describedby="hostTargetHint" placeholder="192.0.2.10">${escapeHtml(Array.isArray(value) ? value.join('\n') : value ?? '')}</textarea>
+              <small id="hostTargetHint">多个 IPv4 或 IPv6 地址每行一个。也可以填一个目标域名。</small>
+            </div>
+          </div>
+          <div class="dialog-footer">
+            <button class="btn btn-default" type="button" data-cancel>取消</button>
+            <button class="btn btn-primary" type="submit">应用到草稿</button>
+          </div>
+        </form>`;
+      const domain = dialog.querySelector('#hostDomain');
+      const target = dialog.querySelector('#hostTarget');
+      for (const input of [domain, target]) input.oninput = () => input.setCustomValidity('');
+      dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
+      dialog.querySelector('form').onsubmit = event => {
+        event.preventDefault();
+        const name = domain.value.trim();
+        const addresses = target.value.split(/[\r\n,，]+/).map(address => address.trim()).filter(Boolean);
+        if (!validHostDomain(name, true)) domain.setCustomValidity('请输入域名或域名通配符。');
+        else if (Object.keys(existing).some(key => key !== original && hostKey(key) === hostKey(name))) {
+          domain.setCustomValidity('这份订阅已有该域名的映射。');
+        }
+        if (!domain.reportValidity()) return;
+        const alias = addresses.length === 1 && /[a-z_]/i.test(addresses[0]) && validHostDomain(addresses[0]);
+        if (!addresses.length || (!alias && !addresses.every(validHostIp))) {
+          target.setCustomValidity('请输入有效的 IPv4、IPv6 地址或单个目标域名。');
+        }
+        if (!target.reportValidity()) return;
+        const next = alias || (addresses.length === 1 && (!Array.isArray(value) || value.length !== 1)) ? addresses[0] : addresses;
+        const updated = Object.entries(existing).filter(([key]) => key !== original);
+        const index = Object.keys(existing).indexOf(original);
+        updated.splice(index < 0 ? updated.length : index, 0, [name, next]);
+        profile.hosts = Object.fromEntries(updated);
+        if (selected.delete(original)) selected.add(name);
+        updateTopbarBadges();
+        renderRows();
+        dialog.close();
+        (original === undefined ? add : [...rows.querySelectorAll('[data-edit-host]')][index])?.focus();
+      };
+      dialog.addEventListener('close', () => {
+        dialog.remove();
+        if (trigger.isConnected) trigger.focus({ preventScroll: true });
+      });
+      el.modalContainer.appendChild(dialog);
+      dialog.showModal();
+    }
+
+    add.onclick = () => editHost(undefined, add);
+    selectAll.onchange = () => {
+      selected.clear();
+      if (selectAll.checked) for (const domain of Object.keys(profile.hosts || {})) selected.add(domain);
+      renderRows();
+    };
+    remove.onclick = () => {
+      if (!selected.size || !confirm(`从「${profile.name}」的草稿删除这 ${selected.size} 条 Hosts 映射？`)) return;
+      profile.hosts = Object.fromEntries(Object.entries(profile.hosts).filter(([name]) => !selected.has(name)));
+      selected.clear();
+      updateTopbarBadges();
+      renderRows();
+      add.focus();
+    };
+    renderRows();
+  }
+
   function renderNetworkView() {
     el.mainStage.innerHTML = '';
     const prof = getCurrentProfile();
     const net = prof.network || {};
     const dns = net.dns || {};
     const tun = net.tun || {};
-    const hosts = prof.hosts || {};
     const dnsMode = dns['enhanced-mode'] || '';
     const dnsModes = [...new Set(['', 'fake-ip', 'redir-host', dnsMode])];
     const lines = value => Array.isArray(value) ? value.join('\n') : '';
@@ -4447,24 +4592,25 @@
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header"><span class="panel-title">静态 Hosts 映射 (${Object.keys(hosts).length} 条)</span></div>
-        <div class="panel-body" style="padding: 0;">
+      <section class="panel" id="hostsPanel" aria-labelledby="hostsTitle">
+        <div class="panel-header hosts-header">
+          <h2 class="panel-title" id="hostsTitle">静态 Hosts 映射 <span id="hostsCount"></span></h2>
+          <div class="rule-panel-actions">
+            <button class="btn btn-danger" id="hostsRemove" type="button" hidden></button>
+            <button class="btn btn-default" id="hostsAdd" type="button">+ 新增映射</button>
+          </div>
+        </div>
+        <div class="panel-body hosts-body">
+          <p id="hostsEmpty" class="empty-message">这份订阅还没有静态 Hosts 映射。</p>
+          <label class="hosts-select-all"><input type="checkbox" id="hostsSelectAll">全选</label>
           <div class="rule-table-container">
             <table class="rule-table hosts-table">
-              <thead><tr><th>域名</th><th>映射 IP</th></tr></thead>
-              <tbody>
-                ${Object.entries(hosts).map(([d, ip]) => `
-                  <tr>
-                    <td style="font-family: var(--font-mono); color: var(--primary);">${escapeHtml(d)}</td>
-                    <td style="font-family: var(--font-mono); color: #fff;">${escapeHtml(Array.isArray(ip) ? ip.join(', ') : ip)}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
+              <thead><tr><th scope="col" aria-label="选择"></th><th scope="col">域名</th><th scope="col">映射目标</th><th scope="col" aria-label="操作"></th></tr></thead>
+              <tbody></tbody>
             </table>
           </div>
         </div>
-      </div>
+      </section>
     `;
 
     function updateField(section, field, value, isDefault) {
@@ -4495,6 +4641,7 @@
       };
     }
     el.mainStage.appendChild(container);
+    renderHostsPanel(container.querySelector('#hostsPanel'), prof);
   }
 
   // ========================================================

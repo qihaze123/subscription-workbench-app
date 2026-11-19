@@ -75,7 +75,7 @@ function generateClashYaml(profile, sources, companySubnets, options = {}) {
   if (profile.hosts && Object.keys(profile.hosts).length > 0) {
     lines.push('hosts:');
     for (const [domain, ip] of Object.entries(profile.hosts)) {
-      lines.push(`  '${domain}': '${ip}'`);
+      lines.push(`  ${JSON.stringify(domain)}: ${JSON.stringify(ip)}`);
     }
     lines.push('');
   }
